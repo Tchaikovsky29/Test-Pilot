@@ -15,7 +15,7 @@ DEFAULT_MAX_CHARS = 4000
 def element_line(e: Element) -> str:
     parts = [("*" if e.is_new else "") + f"[{e.id}] {e.widget}"]
     if e.name:
-        parts.append(f'"{clip(e.name, 150)}"')
+        parts.append(f'"{clip(e.display_name, 150)}"')
     if e.input_type and e.widget in ("textbox", "searchbox") and e.input_type not in ("text", ""):
         parts.append(f"type={e.input_type}")
     if e.value:
@@ -50,6 +50,7 @@ def _assemble(obs: Observation, text_clip: int | None, drop_over: int | None) ->
     by_id = obs.by_id
     body: list[str] = []
     omitted = 0
+    in_dialog = False  # a blocking dialog's prose is what the model must read: never dropped, clipped at 160
 
     def flush_omitted() -> None:
         nonlocal omitted
@@ -59,6 +60,9 @@ def _assemble(obs: Observation, text_clip: int | None, drop_over: int | None) ->
 
     for ln in obs.lines:
         if ln.kind == "text":
+            if in_dialog:
+                body.append(clip(ln.text, 160))
+                continue
             if drop_over is not None and len(ln.text) > drop_over:
                 omitted += 1
                 continue
@@ -66,6 +70,8 @@ def _assemble(obs: Observation, text_clip: int | None, drop_over: int | None) ->
             body.append(clip(ln.text, text_clip) if text_clip else ln.text)
             continue
         flush_omitted()
+        if ln.kind == "overlay":
+            in_dialog = not ln.text.startswith("end")
         if ln.kind == "heading":
             body.append(f"## {ln.text}")
         elif ln.kind == "frame":

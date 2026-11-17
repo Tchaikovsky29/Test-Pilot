@@ -27,3 +27,27 @@ def quote(s: str) -> str:
 
 def well_formed(s: str) -> str:
     return _SURROGATE.sub("\ufffd", s)
+
+# Icon fonts (Material Icons etc.) put their glyph names in the DOM as text: "vpn_key", "hotel Stays".
+_ICON_WORD = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+_LEADING_ICON = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*\s+(?=[A-Z0-9])")
+_TRAILING_ICON = re.compile(r"\s+[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")  # needs an underscore: "expand_more"
+
+
+def is_icon_text(t: str) -> bool:
+    """A text line that is only an icon glyph name: one lowercase token like "vpn_key" or "help"."""
+    return len(t) <= 30 and bool(_ICON_WORD.fullmatch(t)) and ("_" in t or len(t) >= 4)
+
+
+def clean_name(name: str) -> str:
+    """Drop icon glyph names from the ends of a control's name, for display and for icon-free locators:
+    "hotel Stays" -> "Stays", "airline_seat_recline_normal Economy expand_more" -> "Economy"."""
+    out = name
+    m = _LEADING_ICON.match(out)
+    if m and out[m.end():]:
+        out = out[m.end():]
+    while True:
+        m = _TRAILING_ICON.search(out)
+        if not m or not out[:m.start()]:
+            return out
+        out = out[:m.start()]

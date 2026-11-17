@@ -3,7 +3,7 @@ import pytest
 from test_pilot import NavigationError, validate_url
 from test_pilot.locators import is_dynamic_id, verify_locators
 from test_pilot.render import render
-
+from test_pilot.text import clean_name, is_icon_text  # noqa: E402
 
 # ---- URL handling (no browser) -------------------------------------------------------------------------------
 
@@ -177,3 +177,22 @@ def test_signature_ignores_values_and_differs_across_pages(session, base_url):
     assert session.observe().signature() == a
     session.goto(base_url + "/hotels")
     assert session.observe().signature() != a
+
+
+@pytest.mark.parametrize("raw,clean", [
+    ("hotel Stays", "Stays"), ("auto_awesome AI Trip Planner", "AI Trip Planner"),
+    ("flag Nationality Select Nationality", "Nationality Select Nationality"),
+    ("Check-in Date", "Check-in Date"), ("iPhone Case", "iPhone Case"), ("search", "search"), ("hotel", "hotel"),
+    ("Book now", "Book now"), ("flight 2 stops", "2 stops"),
+])
+def test_clean_name(raw, clean):
+    assert clean_name(raw) == clean
+
+
+@pytest.mark.parametrize("text,icon", [
+    ("vpn_key", True), ("currency_exchange", True), ("help", True), ("storage", True),
+    ("IDR", False), ("EN", False), ("or", False), ("Search", False), ("Check-in", False), ("01", False),
+    ("two words", False), ("Prices include taxes.", False),
+])
+def test_is_icon_text(text, icon):
+    assert is_icon_text(text) is icon

@@ -1,16 +1,13 @@
 """Data models shared by every stage. Pure data: no browser code in here."""
-from __future__ import annotations
-
 import hashlib
 import json
 import re
 from typing import Literal
 from urllib.parse import urlparse
-
 from pydantic import BaseModel, Field
+from .text import clean_name
 
 LocatorKind = Literal["role", "label", "placeholder", "testid", "text", "css"]
-
 
 class Locator(BaseModel):
     """One way to find an element again. Backend node ids die with the page; these survive into generated tests."""
@@ -19,6 +16,7 @@ class Locator(BaseModel):
     value: str  # accessible name / label / placeholder / test id / text / css selector
     role: str | None = None  # only for kind="role"
     matches: int | None = Field(default=None, description="live match count; exactly 1 means usable")
+    exact: bool = True  # False = substring match (used with the icon-free form of a name)
     visible: bool = False  # narrowed with .filter(visible=True) to drop hidden duplicates
     nth: int | None = None  # last resort for identical siblings (fragile: depends on page order)
 
@@ -28,16 +26,17 @@ class Locator(BaseModel):
 
     def python(self, root: str = "page") -> str:
         q = json.dumps(self.value, ensure_ascii=False)
+        ex = ", exact=True" if self.exact else ""
         if self.kind == "role":
-            base = f"{root}.get_by_role({json.dumps(self.role)}, name={q}, exact=True)"
+            base = f"{root}.get_by_role({json.dumps(self.role)}, name={q}{ex})"
         elif self.kind == "label":
-            base = f"{root}.get_by_label({q}, exact=True)"
+            base = f"{root}.get_by_label({q}{ex})"
         elif self.kind == "placeholder":
-            base = f"{root}.get_by_placeholder({q}, exact=True)"
+            base = f"{root}.get_by_placeholder({q}{ex})"
         elif self.kind == "testid":
             base = f"{root}.get_by_test_id({q})"
         elif self.kind == "text":
-            base = f"{root}.get_by_text({q}, exact=True)"
+            base = f"{root}.get_by_text({q}{ex})"
         else:
             base = f"{root}.locator({q})"
         if self.visible:
@@ -66,6 +65,11 @@ class Element(BaseModel):
     is_new: bool = False  # not present in the previous observation
     locators: list[Locator] = Field(default_factory=list)
 
+    @property
+    def display_name(self) -> str:
+        """The name without a leading icon-font word, for the model to read. Locators keep using `name`."""
+        return clean_name(self.name)
+    
     def best_locator(self) -> Locator | None:
         return next((loc for loc in self.locators if loc.matches == 1), None)
 

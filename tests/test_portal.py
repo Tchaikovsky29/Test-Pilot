@@ -32,11 +32,13 @@ def test_plain_text_is_not_clickable(portal):
 
 def test_clickable_is_rendered_and_locatable(portal):
     obs = portal.observe()
-    assert 'clickable "hotel Stays"' in render(obs)
+    assert 'clickable "Stays"' in render(obs)          # icon word "hotel" is not shown to the model
     stays = next(e for e in obs.elements if e.name == "hotel Stays")
+    assert stays.name == "hotel Stays"                  # the raw name is kept
     verify_all(portal.page, [stays])
     best = stays.best_locator()
-    assert best and best.kind == "text"
+    assert best and best.kind == "text" and best.exact is False
+    assert best.python() == 'page.get_by_text("Stays")'      # survives a change of icon font
     assert eval(best.python("portal.page")).count() == 1                       # noqa: S307
 
 
@@ -75,7 +77,7 @@ def test_budget_drops_prose_before_controls(portal):
     full = render(portal.observe(), 20000)
     small = render(portal.observe(), 1700)
     assert len(small) < len(full)
-    for must in ('clickable "flight Flights"', 'clickable "Select destination"', 'button "Search Hotels"',
+    for must in ('clickable "Flights"', 'clickable "Select destination"', 'button "Search Hotels"',
                  'button "I Understand & Continue"', "## Travel The Way You Love"):
         assert must in small, must
     assert "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt" not in small
@@ -90,3 +92,20 @@ def test_identical_siblings_get_distinct_nth_locators(portal):
     assert a and b and a.fragile and b.fragile and (a.nth, b.nth) == (0, 1)
     assert eval(a.python("portal.page")).count() == 1                           # noqa: S307
     assert eval(a.python("portal.page")).bounding_box() != eval(b.python("portal.page")).bounding_box()
+
+def test_icon_word_lines_are_dropped(portal):
+    lines = render(portal.observe(), 20000).splitlines()
+    assert "vpn_key" not in lines
+    assert "Prices include taxes and fees for all bookings made through this portal today." in lines
+
+
+def test_dialog_prose_is_kept_even_on_a_tight_budget(portal):
+    small = render(portal.observe(), 1700)
+    assert "Do not use real payment methods" in small     # dialog text survives
+    assert "Lorem ipsum dolor sit amet" not in small      # page prose does not
+
+
+def test_icon_prefixed_names_get_a_substring_locator_first(portal):
+    tab = next(e for e in portal.observe().elements if e.name == "hotel Stays")
+    assert (tab.locators[0].value, tab.locators[0].exact) == ("Stays", False)
+    assert any(l.value == "hotel Stays" and l.exact for l in tab.locators)   # the raw name stays as a fallback

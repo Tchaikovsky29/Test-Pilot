@@ -9,7 +9,7 @@ import re
 
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame, Page
-
+from .text import clean_name
 from .models import Element, Locator
 from .roles import CONTROLS, LABELLED
 
@@ -31,7 +31,10 @@ def _css_attr(attr: str, value: str) -> str:
 def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
     out: list[Locator] = []
     name = e.name
+    clean = clean_name(name)  # "hotel Stays" -> "Stays": the icon word is not part of what a user sees
     if name and e.role in CONTROLS:
+        if clean != name:
+            out.append(Locator(kind="role", role=e.role, value=clean, exact=False))
         out.append(Locator(kind="role", role=e.role, value=name))
     if name and e.widget in LABELLED:
         out.append(Locator(kind="label", value=name))
@@ -44,6 +47,8 @@ def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
         if attrs.get(a):
             out.append(Locator(kind="css", value=_css_attr(a, attrs[a])))
     if name and (e.role in ("button", "link") or e.widget == "clickable") and len(name) <= MAX_TEXT_NAME:
+        if clean != name:
+            out.append(Locator(kind="text", value=clean, exact=False))
         out.append(Locator(kind="text", value=name))
     if attrs.get("id") and not is_dynamic_id(attrs["id"]):
         out.append(Locator(kind="css", value=_css_attr("id", attrs["id"])))
@@ -52,7 +57,7 @@ def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
     seen: set[tuple] = set()
     unique = []
     for loc in out:
-        key = (loc.kind, loc.role, loc.value)
+        key = (loc.kind, loc.role, loc.value, loc.exact)
         if key not in seen:
             seen.add(key)
             unique.append(loc)
@@ -61,15 +66,15 @@ def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
 
 def resolve(root: Page | Frame, loc: Locator):
     if loc.kind == "role":
-        r = root.get_by_role(loc.role, name=loc.value, exact=True)
+        r = root.get_by_role(loc.role, name=loc.value, exact=loc.exact)
     elif loc.kind == "label":
-        r = root.get_by_label(loc.value, exact=True)
+        r = root.get_by_label(loc.value, exact=loc.exact)
     elif loc.kind == "placeholder":
-        r = root.get_by_placeholder(loc.value, exact=True)
+        r = root.get_by_placeholder(loc.value, exact=loc.exact)
     elif loc.kind == "testid":
         r = root.get_by_test_id(loc.value)
     elif loc.kind == "text":
-        r = root.get_by_text(loc.value, exact=True)
+        r = root.get_by_text(loc.value, exact=loc.exact)
     else:
         r = root.locator(loc.value)
     if loc.visible:
@@ -79,7 +84,7 @@ def resolve(root: Page | Frame, loc: Locator):
     return r
 
 
-def _root_for(page: Page, frame_url: str) -> Page | Frame:
+def root_for(page: Page, frame_url: str) -> Page | Frame:
     if not frame_url:
         return page
     return next((f for f in page.frames if f.url == frame_url), page)
@@ -88,7 +93,7 @@ def _root_for(page: Page, frame_url: str) -> Page | Frame:
 def verify_locators(page: Page, e: Element) -> Locator | None:
     """Fill `matches` on each candidate with its live count and return the first unique one (or None).
     A count of 1 predicts Playwright's strict mode will accept it; counts include hidden elements on purpose."""
-    root = _root_for(page, e.frame_url)
+    root = root_for(page, e.frame_url)
     for loc in e.locators:
         try:
             loc.matches = resolve(root, loc).count()
@@ -110,22 +115,25 @@ def verify_locators(page: Page, e: Element) -> Locator | None:
     return e.best_locator()
 
 
+def _key(x: Element) -> tuple:
+    f = x.locators[0]
+    return (x.frame_url, f.kind, f.role, f.value, f.exact)
+
+
+def ensure_locator(page: Page, e: Element, elements: list[Element]) -> Locator | None:
+    """The best unique locator for one element, with a last resort for identical siblings: .nth(i).
+    Playwright returns matches in DOM order, as does the accessibility tree, so if the live count of an ambiguous
+    locator equals the number of elements we saw sharing it, the i-th one is the i-th match. Such locators are
+    marked fragile: they break if the page order changes."""
+    best = verify_locators(page, e)
+    if best or not e.locators:
+        return best
+    same = [x for x in elements if x.locators and _key(x) == _key(e)]
+    if e.locators[0].matches == len(same):
+        e.locators.append(e.locators[0].model_copy(update={"nth": same.index(e), "matches": 1}))
+    return e.best_locator()
+
+
 def verify_all(page: Page, elements: list[Element]) -> None:
-    """verify_locators for every element, then a last resort for identical siblings: .nth(i).
-    Playwright returns matches in DOM order, as does the accessibility tree, so if the live count of an
-    ambiguous locator equals the number of elements we saw sharing it, the i-th one is the i-th match.
-    These locators are marked fragile: they break if the page order changes."""
     for e in elements:
-        verify_locators(page, e)
-
-    def key(x: Element):
-        f = x.locators[0]
-        return (x.frame_url, f.kind, f.role, f.value)
-
-    for e in elements:
-        if e.best_locator() or not e.locators:
-            continue
-        same = [x for x in elements if x.locators and key(x) == key(e)]
-        if e.locators[0].matches == len(same):
-            i = same.index(e)
-            e.locators.append(e.locators[0].model_copy(update={"nth": i, "matches": 1}))
+        ensure_locator(page, e, elements)

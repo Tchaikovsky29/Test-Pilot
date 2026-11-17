@@ -17,7 +17,7 @@ from urllib.parse import urljoin, urlparse
 from playwright.sync_api import CDPSession
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
-
+from .text import clip, fold, is_icon_text, norm
 from .locators import candidates
 from .models import Element, Line, Observation
 from .roles import BLOCKS, CHECKABLE, CONTROLS, DATE_INPUT_TYPES, NATIVE_INPUT_ROLES
@@ -184,8 +184,8 @@ class _FrameWalker:
             return
         t = norm(" ".join(self.text))
         self.text.clear()
-        if not t:
-            return
+        if not t or is_icon_text(t):
+            return  # empty, or just an icon-font glyph name such as "vpn_key"
         last = self.elements[-1] if self.elements else None
         if self.lines and self.lines[-1].kind == "control" and last and fold(t) in (fold(last.name), fold(last.description)):
             return  # a label printed after its control, which already carries it as its name
