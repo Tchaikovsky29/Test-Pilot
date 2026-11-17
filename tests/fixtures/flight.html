@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>SkyBook - Flights</title>
+<style>.ghost{opacity:0}.gone{display:none}</style></head>
+<body>
+<header><nav>
+  <a href="/flights">Flights</a> <a href="/hotels?city=pune">Hotels</a>
+  <a href="https://partner.example.com/deals">Partner deals</a> <a href="#top">Back to top</a>
+</nav></header>
+<main>
+<h1>Book a flight</h1>
+<p class="ghost">Booking confirmed!</p>
+<p class="gone">Hidden promo text</p>
+<p>Prices include taxes.</p>
+<form id="search" onsubmit="return false">
+  <label for="from">From</label>
+  <input id="from" name="from" required placeholder="City or airport" aria-describedby="from-hint">
+  <span id="from-hint">Enter an IATA code or a city</span>
+  <label for="to">To</label>
+  <input id="to" name="to" required>
+  <label for="email">Contact email</label>
+  <input id="email" type="email">
+  <label for="depart">Departure date</label>
+  <input id="depart" type="date" required>
+  <label for="cabin">Cabin</label>
+  <select id="cabin"><option>Economy</option><option>Premium economy</option><option>Business</option>
+    <option disabled>First (unavailable)</option></select>
+  <label><input type="checkbox" id="nonstop"> Nonstop only</label>
+  <label for="pw">Account password</label>
+  <input id="pw" type="password" value="hunter2">
+  <label for="promo-8f3a9c21d4e5">Promo code</label>
+  <input id="promo-8f3a9c21d4e5" name="promo">
+  <button id="go" type="button">Search flights</button>
+  <button type="button" disabled>Book now</button>
+</form>
+<div id="results"></div>
+<iframe src="/frame.html" title="partner offers" width="400" height="120"></iframe>
+</main>
+<script>
+document.getElementById('go').addEventListener('click', () => {
+  fetch('/slow').then(r => r.text()).then(() => {
+    document.getElementById('results').innerHTML =
+      '<h2>Results</h2><ul><li>Flight AI-101 07:00 for 5,400 <button>Select</button></li>' +
+      '<li>Flight 6E-202 09:30 for 4,900 <button>Select</button></li></ul>';
+  });
+});
+</script>
+</body></html>

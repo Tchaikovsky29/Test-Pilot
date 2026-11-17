@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Checkout</title>
+<style>.opt,.pointer{cursor:pointer}.field{border:1px solid #999;padding:8px;width:260px;display:block;margin:6px 0}</style></head>
+<body>
+<h1>Checkout</h1>
+<div class="field pointer" id="dest"><span id="destval">Select destination</span></div>
+<ul id="list" hidden>
+  <li class="opt" onclick="pick('Delhi (DEL)')">Delhi (DEL)</li>
+  <li class="opt" onclick="pick('Pune (PNQ)')">Pune (PNQ)</li>
+</ul>
+<label for="cardno">Card number</label><input id="cardno">
+<label for="name">Passenger name</label><input id="name">
+<button id="add0" onclick="bump(0)">Add</button>
+<button id="add1" onclick="bump(1)">Add</button>
+<div id="counts">0,0</div>
+<button id="pay" onclick="window.paid = true">Pay now</button>
+<button id="del" onclick="window.deleted = true">Delete booking</button>
+<button id="leave" onclick="location.href = 'http://localhost:' + location.port + '/flights'">Visit partner site</button>
+<script>
+  const c = [0, 0];
+  function bump(i) { c[i]++; document.getElementById('counts').textContent = c.join(','); }
+  document.getElementById('dest').addEventListener('click', () => { document.getElementById('list').hidden = false; });
+  function pick(v) { document.getElementById('destval').textContent = v; document.getElementById('list').hidden = true; }
+</script>
+</body></html>
