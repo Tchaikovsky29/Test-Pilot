@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TravelPortal</title>
+<style>
+ body{font-family:sans-serif;margin:0}
+ .tab{display:inline-block;padding:8px 14px;border:1px solid #ccc}
+ .pointer{cursor:pointer}
+ .field{border:1px solid #999;padding:8px;width:260px;display:block;margin:6px 0}
+ .offscreen{position:absolute;left:-9999px}
+ #modal{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99;display:flex;align-items:center;justify-content:center}
+ #modal .box{background:#fff;padding:24px;width:420px}
+</style></head>
+<body>
+<header>
+  <button>Services</button> <button class="offscreen">Services</button>
+  <button aria-label="Open menu" title="Open menu">Open menu</button>
+  <a href="/login">Login</a>
+</header>
+<main>
+  <h1>Travel The Way You Love</h1>
+  <div id="tabs">
+    <div class="tab pointer" onclick="show('flights')">flight Flights</div>
+    <div class="tab pointer" onclick="show('hotels')">hotel Stays</div>
+    <div class="tab" id="tours">Tours</div>   <!-- listener only, no pointer cursor -->
+  </div>
+  <p>Prices include taxes and fees for all bookings made through this portal today.</p>
+  <section id="search">
+    <span>Destination or Hotel Name</span>
+    <div class="field pointer" id="dest"><span id="destval">Select destination</span></div>
+    <span>Guests &amp; Rooms</span>
+    <div class="field" id="guests">2 Guests, 1 Room</div>   <!-- plain text: NOT interactive -->
+    <label for="cin">Check-in</label><input id="cin" readonly value="Nov 17, 2026">
+    <button id="search-btn" title="Search Hotels">Search Hotels</button>
+  </section>
+  <div id="cards"></div>
+  <p class="long">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>
+</main>
+<footer><a href="/blog">Blog home</a></footer>
+<div id="modal"><div class="box">
+  <h2>Testing Environment Only</h2>
+  <p>This is a testing platform. Do not use real payment methods.</p>
+  <button id="ok">I Understand &amp; Continue</button>
+</div></div>
+<script>
+  // delegated handler on the body must not turn the whole page into a "clickable"
+  document.body.addEventListener('click', () => {});
+  document.getElementById('tours').addEventListener('click', () => {});
+  function show(x) {}
+  let html = '';
+  for (let i = 1; i <= 8; i++) html += '<a class="card" href="/blog/post-' + i + '"><span>Travel Tips JAN ' + i + ' 2 MIN READ</span><h3>How to plan trip number ' + i + '</h3><p>Travel broadens minds and connects cultures, but it also carries an environmental cost and many more words.</p><span>Read More</span></a>';
+  document.getElementById('cards').innerHTML = html;
+  document.getElementById('ok').addEventListener('click', () => document.getElementById('modal').remove());
+</script>
+</body></html>
