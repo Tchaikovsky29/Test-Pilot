@@ -1,29 +1,26 @@
-"""python -m test_pilot.cli observe <url>  : print the page exactly as the model will see it (no LLM involved)."""
+"""test-pilot observe <url>  : print the page exactly as the model will see it (no LLM involved).
+test-pilot llm              : check the LLM configuration with one tiny call."""
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from .browser import BrowserConfig, BrowserSession, NavigationError
+from .llm import LLM, PROVIDERS, LLMConfig, LLMError
 from .locators import verify_all
 from .render import DEFAULT_MAX_CHARS, render
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="test-pilot")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    ob = sub.add_parser("observe", help="open a URL and print what the model would see")
-    ob.add_argument("url")
-    ob.add_argument("--headed", action="store_true", help="show the browser window")
-    ob.add_argument("--cdp-url", help="connect to a remote Chromium (default: env TEST_PILOT_CDP_URL, else launch locally)")
-    ob.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
-    ob.add_argument("--json", action="store_true", help="print the full Observation as JSON")
-    ob.add_argument("--locators", action="store_true", help="also print a verified, unique locator for each control")
-    load_dotenv()
-    args = ap.parse_args(argv)
+class _Ping(BaseModel):
+    ok: bool
+    say: str = ""
 
+
+def _observe(args) -> int:
     cfg = BrowserConfig(headless=not args.headed)
     if args.cdp_url:
         cfg.cdp_url = args.cdp_url
@@ -45,6 +42,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
+
+
+def _llm(args) -> int:
+    try:
+        cfg = LLMConfig.from_env(args.provider, args.model)
+        llm = LLM(cfg)
+        print(f"provider: {cfg.provider.name}   model: {cfg.model}   endpoint: {cfg.base_url}   key: set ({cfg.provider.key_env})")
+        if args.models:
+            print("\n".join(llm.list_models()))
+            return 0
+        t0 = time.monotonic()
+        reply = llm.structured([{"role": "user", "content": 'Reply with JSON: {"ok": true, "say": "hello"}'}], _Ping)
+        print(f"reply: {reply.model_dump_json()}   ({time.monotonic() - t0:.1f}s, {llm.usage.summary()})")
+    except LLMError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="test-pilot")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ob = sub.add_parser("observe", help="open a URL and print what the model would see")
+    ob.add_argument("url")
+    ob.add_argument("--headed", action="store_true", help="show the browser window")
+    ob.add_argument("--cdp-url", help="connect to a remote Chromium (default: env TEST_PILOT_CDP_URL, else launch locally)")
+    ob.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    ob.add_argument("--json", action="store_true", help="print the full Observation as JSON")
+    ob.add_argument("--locators", action="store_true", help="also print a verified, unique locator for each control")
+
+    lm = sub.add_parser("llm", help="check the LLM configuration with one tiny call")
+    lm.add_argument("--provider", choices=sorted(PROVIDERS), help="default: env LLM_PROVIDER, else gemini")
+    lm.add_argument("--model", help="default: env LLM_MODEL, else the provider's default")
+    lm.add_argument("--models", action="store_true", help="list the model ids this key can use")
+
+    load_dotenv()
+    args = ap.parse_args(argv)
+    return _observe(args) if args.cmd == "observe" else _llm(args)
 
 
 if __name__ == "__main__":
