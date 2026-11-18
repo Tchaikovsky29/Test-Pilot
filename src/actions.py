@@ -12,6 +12,7 @@ from playwright.sync_api import Error as PlaywrightError
 from pydantic import BaseModel, Field, TypeAdapter
 
 from .browser import BrowserSession
+from .evidence import Changes, diff, render_changes
 from .locators import ensure_locator, resolve, root_for
 from .models import Element, Locator, Observation
 from .policy import Policy
@@ -121,13 +122,18 @@ class Actor:
     def __init__(self, session: BrowserSession, policy: Policy, click_timeout_ms: int = CLICK_TIMEOUT_MS):
         self.session, self.policy, self.click_timeout_ms = session, policy, click_timeout_ms
         self.obs: Observation | None = None
+        self.changes: Changes = Changes()
         self.steps: list[Step] = []
         self.count = 0
 
     # -- looking ---------------------------------------------------------------------------------------------------
     def look(self, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+        """The page as the model sees it, followed by what changed since the previous look (new text, alerts,
+        field errors). `self.changes` keeps the same information as data, for the test designer."""
+        before = self.obs
         self.obs = self.session.observe()
-        return render(self.obs, max_chars)
+        self.changes = diff(before, self.obs)
+        return render(self.obs, max_chars) + render_changes(self.changes)
 
     # -- the one entry point ---------------------------------------------------------------------------------------
     def act(self, action: Action) -> ActionResult:

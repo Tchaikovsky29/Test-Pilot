@@ -64,6 +64,17 @@ OVERLAY_JS = r"""(() => {
   return found;
 })()"""
 
+# Fields the browser currently reports as wrong. :user-invalid only matches after an interaction or a submit attempt,
+# so a pristine form with empty required fields reports nothing: only real feedback is evidence for a test.
+VALIDATION_JS = r"""(() => {
+  const bad = (e) => { try { return e.matches(':user-invalid'); } catch (err) { return false; } };
+  return [...document.querySelectorAll('input,select,textarea')]
+    .filter(e => e.willValidate && !e.validity.valid && bad(e) && e.checkVisibility());
+})()"""
+
+ALERT_ROLES = frozenset({"alert", "status"})  # live regions: error banners, toasts, "3 results found"
+CONSTRAINT_ATTRS = ("pattern", "minlength", "maxlength", "min", "max", "step")
+
 # Elements that are interactive but expose no accessibility role (div tabs, custom dropdowns, date-picker triggers):
 # the page attached a click listener, or styled them cursor:pointer. Chrome's DOM snapshot reports both in one call.
 CLICK_SKIP_TAGS = {"HTML", "BODY", "INPUT", "SELECT", "TEXTAREA", "OPTION", "OPTGROUP", "IFRAME", "SCRIPT", "STYLE", "SVG", "PATH", "LABEL"}
@@ -191,18 +202,72 @@ class _FrameWalker:
             return  # a label printed after its control, which already carries it as its name
         self.lines.append(Line(kind="text", text=clip(t, 300)))
 
-    def walk(self, node: dict | None, inside: str) -> None:
-        if not node:
+    def walk(self, node: dict, inside: str) -> None:
+        role = _val(node.get("role"))
+        role = "" if role is None else str(role)
+        name = norm(_val(node.get("name")))
+        kids = [self.by_id.get(c) for c in node.get("childIds") or []]
+        if node.get("ignored"):
+            for c in kids:
+                self.walk(c, inside)
             return
-        if self.overlay is not None and node.get("backendDOMNodeId") == self.overlay and self.overlay_lines is None:
-            self.flush()
-            start = len(self.lines)
-            self._walk(node, inside)
-            self.flush()
-            self.overlay_lines = self.lines[start:]
-            del self.lines[start:]
+        if role == "StaticText":
+            t = fold(name)
+            if t and t not in inside and (self.visible is None or t in self.visible):
+                self.text.append(name)
             return
-        self._walk(node, inside)
+        if role == "heading" and name and fold(name) in inside:
+            return  # already said by the card link or control that contains it
+        if role == "heading" and name:
+            self.flush()
+            self.lines.append(Line(kind="heading", text=name))
+            for c in kids:
+                self.walk(c, fold(name))
+            self.flush()
+            return
+        if role in ALERT_ROLES:
+            text = name or self._subtree_text(node)
+            if text and not self._has_control(node):
+                self.flush()
+                self.lines.append(Line(kind="alert", text=clip(text, 300)))
+                return
+        bid = node.get("backendDOMNodeId")
+        info = self.dom.get(bid) if bid is not None else None
+        value = norm(_val(node.get("value")))
+        focusable = _prop(node, "focusable") and role != "RootWebArea" and (name or value or _prop(node, "editable"))
+        is_control = bid is not None and (role in CONTROLS or role in NATIVE_INPUT_ROLES or bool(focusable))
+        widget_override = None
+        if not is_control and bid in self.clickables and self.in_control == 0 and not self._has_control(node):
+            label = name or self._subtree_text(node)
+            if label and len(label) <= MAX_CLICKABLE_TEXT:
+                is_control, name, widget_override = True, label, "clickable"
+        if not is_control:
+            if role in BLOCKS:
+                self.flush()
+                for c in kids:
+                    self.walk(c, inside)
+                self.flush()
+            else:
+                for c in kids:
+                    self.walk(c, inside)
+            return
+        self.flush()
+        if self.lines and self.lines[-1].kind == "text" and self.lines[-1].text.lower() == name.lower():
+            self.lines.pop()  # its label, printed as its name
+        el = self._element(node, role, name, value, bid, info, widget_override)
+        self.elements.append(el)
+        self.lines.append(Line(kind="control", element_id=el.id))
+        if el.widget in ("select", "date", "file") or role in NATIVE_INPUT_ROLES:
+            return  # children are the browser's own widget parts
+        # Only what the line showed counts as said, except for links and clickables: a card link's long text is
+        # repeated by its heading and paragraph inside, and printing it again only burns the budget.
+        shown = name if (role == "link" or widget_override) else clip(name, 150)
+        inside = fold(f"{inside} {shown} {value}")
+        self.in_control += 1
+        for c in kids:
+            self.walk(c, inside)
+        self.in_control -= 1
+        self.flush()
 
     def _subtree_text(self, node: dict) -> str:
         parts: list[str] = []
@@ -326,6 +391,7 @@ class _FrameWalker:
             id=bid, role=role, widget=widget, name=name, value=value, states=states,
             options=info.options if info else [], tag=tag, input_type=itype, required=required,
             description="" if fold(norm(_val(node.get("description")))) in ("", fold(name)) else norm(_val(node.get("description"))),
+            constraints={k: attrs[k] for k in CONSTRAINT_ATTRS if attrs.get(k)} if tag in ("INPUT", "TEXTAREA") else {},
             href=_short_href(attrs.get("href", ""), self.page_url) if role == "link" else "",
             frame_url=self.frame_url,
             is_new=self.previous is not None and bid not in self.previous,
@@ -383,7 +449,34 @@ class Perceiver:
                 self.cdp.send("Runtime.releaseObject", {"objectId": oid})
         except (PlaywrightError, KeyError):
             return None
-
+        
+    def _validation(self) -> dict[int, str]:
+        """backendNodeId -> the browser's validation message, for fields that are in error right now."""
+        try:
+            r = self.cdp.send("Runtime.evaluate", {"expression": VALIDATION_JS, "returnByValue": False})
+            arr = (r.get("result") or {}).get("objectId")
+            if not arr or r.get("exceptionDetails"):
+                return {}
+            out: dict[int, str] = {}
+            try:
+                props = self.cdp.send("Runtime.getProperties", {"objectId": arr, "ownProperties": True})["result"]
+                for p in props:
+                    oid = (p.get("value") or {}).get("objectId")
+                    if not p["name"].isdigit() or not oid:
+                        continue
+                    bid = self.cdp.send("DOM.describeNode", {"objectId": oid})["node"].get("backendNodeId")
+                    msg = self.cdp.send("Runtime.callFunctionOn", {
+                        "objectId": oid, "returnByValue": True,
+                        "functionDeclaration": "function () { return this.validationMessage; }",
+                    })["result"].get("value", "")
+                    if bid is not None and msg:
+                        out[bid] = norm(msg)
+            finally:
+                self.cdp.send("Runtime.releaseObject", {"objectId": arr})
+            return out
+        except (PlaywrightError, KeyError):
+            return {}
+        
     def _clickables(self) -> set[int]:
         try:
             area = self.page.evaluate("() => innerWidth * innerHeight")
@@ -401,7 +494,7 @@ class Perceiver:
             visible = self._retry(lambda: self.page.evaluate(VISIBLE_JS))
         except PlaywrightError:
             visible = None
-        clickables, overlay = self._clickables(), self._overlay_bid()
+        clickables, overlay, invalid = self._clickables(), self._overlay_bid(), self._validation()
         lines: list[Line] = []
         elements: list[Element] = []
         hoisted: list[Line] = []
@@ -421,6 +514,11 @@ class Perceiver:
         if hoisted:  # a modal dialog covers the page: show it first, whatever its place in the document
             lines[:0] = [Line(kind="overlay", text="dialog blocking the page: handle it first"), *hoisted,
                          Line(kind="overlay", text="end of dialog")]
+        for e in elements:  # fields the browser is complaining about right now
+            if e.id in invalid:
+                e.validation = invalid[e.id]
+                if "invalid" not in e.states:
+                    e.states.append("invalid")
         self._previous = {e.id for e in elements}
         nav_error = None
         if info["url"].startswith("chrome-error:"):

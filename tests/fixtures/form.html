@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Find trips</title></head>
+<body>
+<h1>Find trips</h1>
+<p>Fields marked required must be filled in.</p>
+<form id="f">
+  <label for="city">City</label><input id="city" name="city" required maxlength="20">
+  <label for="email">Email</label><input id="email" name="email" type="email" pattern="[^@]+@[^@]+\.[a-z]{2,}">
+  <label for="age">Age</label><input id="age" name="age" type="number" min="18" max="99">
+  <button type="submit">Search</button>
+</form>
+<button id="boom" type="button">Show error</button>
+<div id="out"></div>
+<script>
+  f.addEventListener('submit', e => {
+    e.preventDefault();
+    out.innerHTML = '<h2>Searching</h2><p>Looking for trips to ' + city.value + '</p>';
+  });
+  boom.addEventListener('click', () => { out.innerHTML = '<div role="alert">Could not find any trips</div>'; });
+</script>
+</body></html>

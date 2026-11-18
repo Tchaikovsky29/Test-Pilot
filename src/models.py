@@ -60,6 +60,8 @@ class Element(BaseModel):
     input_type: str = ""
     required: bool = False
     description: str = ""  # aria-describedby text: hints and validation messages live here
+    validation: str = ""  # the browser's own error for this field, only after the user (or an agent) tried to submit
+    constraints: dict[str, str] = Field(default_factory=dict)  # pattern, minlength, maxlength, min, max, step
     href: str = ""
     frame_url: str = ""  # "" for the main frame
     is_new: bool = False  # not present in the previous observation
@@ -69,13 +71,13 @@ class Element(BaseModel):
     def display_name(self) -> str:
         """The name without a leading icon-font word, for the model to read. Locators keep using `name`."""
         return clean_name(self.name)
-    
+
     def best_locator(self) -> Locator | None:
         return next((loc for loc in self.locators if loc.matches == 1), None)
 
 
 class Line(BaseModel):
-    kind: Literal["heading", "text", "control", "frame", "overlay"]
+    kind: Literal["heading", "text", "control", "frame", "overlay", "alert"]
     text: str = ""
     element_id: int | None = None
 

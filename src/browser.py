@@ -34,7 +34,7 @@ class BrowserConfig:
     cdp_url: str | None = field(default_factory=lambda: os.getenv("TEST_PILOT_CDP_URL") or None)  # remote browser
     viewport: tuple[int, int] = (1280, 800)
     nav_timeout_ms: int = 30_000
-    dialog_policy: str = "accept"  # accept | dismiss; a policy layer can tighten this later
+    dialog_policy: str = "accept"
 
 
 class BrowserSession:

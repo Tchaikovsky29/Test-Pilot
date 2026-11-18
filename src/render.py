@@ -21,8 +21,12 @@ def element_line(e: Element) -> str:
     if e.value:
         parts.append("= " + quote(clip(e.value, 100)))
     parts.extend(e.states)
+    if e.constraints:
+        parts.append("[" + " ".join(f"{k}={clip(v, 30)}" for k, v in e.constraints.items()) + "]")
     if e.href:
         parts.append("-> " + clip(e.href, 70))
+    if e.validation:
+        parts.append("(error: " + quote(clip(e.validation, 120)) + ")")
     if e.description:
         parts.append("(hint: " + quote(clip(e.description, 120)) + ")")
     line = " ".join(parts)
@@ -78,6 +82,8 @@ def _assemble(obs: Observation, text_clip: int | None, drop_over: int | None) ->
             body.append(f"--- frame {ln.text} ---")
         elif ln.kind == "overlay":
             body.append(f"--- {ln.text} ---")
+        elif ln.kind == "alert":
+            body.append(f"! {clip(ln.text, 200)}")  # live-region messages are evidence: never dropped or shortened further
         elif ln.kind == "control" and ln.element_id in by_id:
             body.append(element_line(by_id[ln.element_id]))
     flush_omitted()
