@@ -203,6 +203,21 @@ class _FrameWalker:
         self.lines.append(Line(kind="text", text=clip(t, 300)))
 
     def walk(self, node: dict, inside: str) -> None:
+        bid = node.get("backendDOMNodeId")
+        if bid is not None and self.overlay is not None and bid == self.overlay and not getattr(self, "in_overlay", False):
+            self.flush()
+            saved_lines = self.lines
+            self.lines = []
+            self.in_overlay = True
+            kids = [self.by_id.get(c) for c in node.get("childIds") or []]
+            for c in kids:
+                if c:
+                    self.walk(c, inside)
+            self.flush()
+            self.overlay_lines = self.lines
+            self.lines = saved_lines
+            self.in_overlay = False
+            return
         role = _val(node.get("role"))
         role = "" if role is None else str(role)
         name = norm(_val(node.get("name")))

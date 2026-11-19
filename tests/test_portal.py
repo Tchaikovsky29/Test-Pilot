@@ -109,3 +109,11 @@ def test_icon_prefixed_names_get_a_substring_locator_first(portal):
     tab = next(e for e in portal.observe().elements if e.name == "hotel Stays")
     assert (tab.locators[0].value, tab.locators[0].exact) == ("Stays", False)
     assert any(l.value == "hotel Stays" and l.exact for l in tab.locators)   # the raw name stays as a fallback
+
+def test_a_dialog_does_not_change_the_page_type(portal):
+    with_dialog = portal.observe()
+    assert with_dialog.blocked
+    before = with_dialog.signature()
+    portal.page.click("#ok")
+    without = portal.observe()
+    assert not without.blocked and without.signature() == before

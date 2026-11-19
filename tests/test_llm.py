@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 from test_pilot.cli import main as cli_main
-from test_pilot.llm import LLM, PROVIDERS, LLMConfig, LLMConfigError, LLMError, extract_json
+from test_pilot.llm import LLM, PROVIDERS, LLMConfig, LLMConfigError, LLMError, LLMTransientError, extract_json
 
 
 # ---- a fake server ----------------------------------------------------------------------------------------------
@@ -45,8 +45,8 @@ def fake():
             step = state.script.pop(0) if state.script else {"content": "{}"}
             status = step.get("status", 200)
             if status != 200:
-                return self._send(status, {"error": {"message": step.get("message", "boom"), "type": "x"}},
-                                  [("retry-after-ms", "20")])
+                err = step.get("error") or {"message": step.get("message", "boom"), "type": "x"}
+                return self._send(status, {"error": err}, [("retry-after-ms", "20")])
             self._send(200, {
                 "id": "c1", "object": "chat.completion", "created": 0, "model": body["model"],
                 "choices": [{"index": 0, "finish_reason": step.get("finish", "stop"),
@@ -315,3 +315,61 @@ def test_cli_llm_check_without_a_key(monkeypatch, capsys):
     monkeypatch.chdir("/tmp")                                       # no .env to pick up
     assert cli_main(["llm", "--provider", "openai"]) == 1
     assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+# ---- the provider's own JSON check (Groq's json_validate_failed) ---------------------------------------------------
+
+def groq_json_failure(generated):
+    return {"status": 400, "error": {"message": "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' "
+                                                "for more details.", "type": "invalid_request_error",
+                                     "code": "json_validate_failed", "failed_generation": generated}}
+
+
+def test_a_usable_failed_generation_is_salvaged_without_another_call(fake):
+    fake.script = [groq_json_failure('Here is the plan: {"goal": "g", "steps": ["a"]}')]
+    assert make(fake, "groq").structured(MSG, Plan) == Plan(goal="g", steps=["a"])
+    assert len(fake.requests) == 1
+
+
+def test_an_unusable_failed_generation_is_retried_without_strict_json_mode(fake):
+    fake.script = [groq_json_failure("{broken"), {"content": '{"goal": "g", "steps": ["a"]}'}]
+    assert make(fake, "groq").structured(MSG, Plan).steps == ["a"]
+    assert "response_format" in fake.requests[0]["body"] and "response_format" not in fake.requests[1]["body"]
+
+
+def test_a_missing_failed_generation_is_also_retried(fake):
+    fake.script = [groq_json_failure(""), {"content": '{"goal": "g", "steps": ["a"]}'}]
+    assert make(fake, "groq").structured(MSG, Plan).goal == "g"
+
+
+def test_a_second_provider_json_failure_is_a_transient_error(fake):
+    fake.script = [groq_json_failure("{broken"), groq_json_failure("{broken")]
+    with pytest.raises(LLMTransientError, match="Failed to validate JSON"):
+        make(fake, "groq").structured(MSG, Plan)
+    assert len(fake.requests) == 2                                   # not an endless loop
+
+
+def test_a_failed_attempt_still_counts_against_the_budget(fake):
+    fake.script = [groq_json_failure("{broken"), {"content": '{"goal": "g", "steps": []}'}]
+    llm = make(fake, "groq", LLM_MAX_CALLS="5")
+    llm.structured(MSG, Plan)
+    assert llm.usage.calls == 2
+
+
+def test_which_errors_are_worth_another_try(fake):
+    fake.script = [{"status": 401}]
+    with pytest.raises(LLMError) as auth:
+        make(fake).chat(MSG)
+    assert auth.value.transient is False
+    fake.script = [{"status": 500, "message": "server hiccup"}, {"status": 500, "message": "server hiccup"}]
+    with pytest.raises(LLMError) as server:
+        make(fake).chat(MSG)
+    assert server.value.transient is True
+    cfg = LLMConfig.from_env(env={"GEMINI_API_KEY": "k", "LLM_BASE_URL": "http://127.0.0.1:9/v1"})
+    cfg.max_retries = 0
+    with pytest.raises(LLMError) as conn:
+        LLM(cfg).chat(MSG)
+    assert conn.value.transient is True
+    fake.script = [{"status": 429}, {"status": 429}]
+    with pytest.raises(LLMError) as rate:
+        make(fake).chat(MSG)
+    assert rate.value.transient is False                             # already waited; retrying at once would not help

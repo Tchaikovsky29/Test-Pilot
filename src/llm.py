@@ -23,7 +23,22 @@ T = TypeVar("T")
 
 
 class LLMError(Exception):
-    """A problem with the model call that is safe to show the user."""
+    """A problem with the model call that is safe to show the user. `transient` errors (a flaky generation, a timeout,
+    a dropped connection) are worth one more try; the others (bad key, unknown model, budget) are not."""
+    transient = False
+
+
+class LLMTransientError(LLMError):
+    transient = True
+
+
+class LLMJsonModeError(LLMTransientError):
+    """The provider's own JSON check rejected the reply (Groq: json_validate_failed). `failed_generation` is what the
+    model actually produced, which is often usable."""
+
+    def __init__(self, message: str, failed_generation: str = ""):
+        super().__init__(message)
+        self.failed_generation = failed_generation
 
 
 class LLMConfigError(LLMError):
@@ -158,11 +173,11 @@ class LLM:
             kwargs["reasoning_effort"] = c.reasoning_effort
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        self.usage.calls += 1  # counted when attempted: a failing call still spends quota
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except openai.OpenAIError as e:
-            raise LLMError(self._explain(e)) from None
-        self.usage.calls += 1
+            raise self._wrap(e) from None
         if resp.usage:
             self.usage.prompt_tokens += resp.usage.prompt_tokens or 0
             self.usage.completion_tokens += resp.usage.completion_tokens or 0
@@ -176,28 +191,45 @@ class LLM:
         return text
 
     def structured(self, messages: list[dict], schema: type[T] | TypeAdapter, *, max_repairs: int = 1) -> T:
-        """Ask for JSON and validate it against a pydantic model. A bad reply is sent back once with the problems
-        listed, which fixes most small-model slips; after that it raises LLMError."""
+        """Ask for JSON and validate it against a pydantic model.
+
+        Two kinds of slip are handled here so callers do not have to:
+          * the provider's own JSON check rejects the reply (Groq's json_validate_failed): the text it generated is
+            used if it parses, otherwise the request is repeated once without the strict mode;
+          * the reply parses but does not fit the schema: it is sent back once with the problems listed.
+        After that it raises LLMError."""
         adapter = schema if isinstance(schema, TypeAdapter) else TypeAdapter(schema)
         msgs = list(messages)
-        for attempt in range(max_repairs + 1):
-            text = self.chat(msgs, json_mode=True)
+        repairs, json_mode = 0, True
+        while True:
+            try:
+                text = self.chat(msgs, json_mode=json_mode)
+            except LLMJsonModeError as e:
+                if e.failed_generation:
+                    try:
+                        return adapter.validate_python(extract_json(e.failed_generation))
+                    except (ValueError, ValidationError):
+                        pass
+                if json_mode:
+                    json_mode = False
+                    continue
+                raise
             try:
                 return adapter.validate_python(extract_json(text))
             except (ValueError, ValidationError) as e:
                 problem = clip(str(e).replace("\n", " "), 400)
-                if attempt == max_repairs:
+                if repairs >= max_repairs:
                     raise LLMError(f"{self.config.provider.name} did not return valid JSON for this request: {problem}") from None
+                repairs += 1
                 msgs = [*msgs, {"role": "assistant", "content": text},
                         {"role": "user", "content": f"That reply was not valid: {problem}. "
                                                     "Reply again with only the corrected JSON object."}]
-        raise AssertionError("unreachable")
 
     def list_models(self) -> list[str]:
         try:
             return sorted(m.id for m in self._client.models.list())
         except openai.OpenAIError as e:
-            raise LLMError(self._explain(e)) from None
+            raise self._wrap(e) from None
 
     # -- errors in plain words -------------------------------------------------------------------------------------
     @staticmethod
@@ -213,6 +245,25 @@ class LLM:
             if msg:
                 return str(msg)
         return re.sub(r"^Error code: \d+ - ", "", str(getattr(e, "message", e)))
+
+    @staticmethod
+    def _error_object(e: openai.OpenAIError) -> dict:
+        body = getattr(e, "body", None)
+        if isinstance(body, list) and body:
+            body = body[0]
+        if not isinstance(body, dict):
+            return {}
+        return body["error"] if isinstance(body.get("error"), dict) else body
+
+    def _wrap(self, e: openai.OpenAIError) -> LLMError:
+        message = self._explain(e)
+        obj = self._error_object(e)
+        if isinstance(e, openai.BadRequestError) and (
+                obj.get("code") == "json_validate_failed" or "failed to validate json" in message.lower()):
+            return LLMJsonModeError(message, str(obj.get("failed_generation") or ""))
+        if isinstance(e, (openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError)):
+            return LLMTransientError(message)
+        return LLMError(message)
 
     def _explain(self, e: openai.OpenAIError) -> str:
         c, p = self.config, self.config.provider
