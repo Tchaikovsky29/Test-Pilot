@@ -1,8 +1,20 @@
 # Test-Pilot
 
-AI test-case generator for web apps. You give it a URL and a requirement (for example, "book a flight from Pune to Delhi"). It explores the app in a real browser, designs valid and invalid test cases, and turns them into runnable Playwright tests with a Pass/Fail result.
+AI test-case generator for web apps. Give it a URL and a requirement (for example, "book a flight from Pune to Delhi"), and it explores the app in a real browser, records replayable Playwright steps and browser evidence, and produces a JSON exploration report for later test design and execution.
 
-> **Status: proof of concept.** The browser layer (perception, actions, safety policy) is built and tested. The LLM explorer loop, test designer, validator and report are next. See the [roadmap](#roadmap).
+## Status
+
+Test-Pilot is an early-stage working implementation, not just a proof of concept. It can:
+
+- perceive and summarize a live page;
+- act safely through Playwright;
+- call Gemini, Groq or OpenAI-compatible models for structured decisions;
+- turn a requirement into a short exploration plan;
+- run a bounded browser exploration and collect replayable steps and evidence;
+- write a timestamped JSON exploration report;
+- compare observations to capture navigation, text changes, alerts and field validation errors.
+
+The test designer, compiled Playwright test suite and Pass/Fail runner are still in progress.
 
 ## How it works
 
@@ -10,56 +22,71 @@ AI test-case generator for web apps. You give it a URL and a requirement (for ex
 requirement + URL
       │
       ▼
- [analyzer] ──► requirement points, exploration plan                       (planned)
+ [analyzer] ──► requirement points, assumptions, areas to probe
       │
       ▼
- [explorer]  perceive ─► LLM picks one action ─► policy check ─► act       (perceive, act, policy: built)
-      │                                                                    (LLM loop: planned)
-      ▼
- [designer]  4–5 test cases, valid and invalid, each with an assertion     (planned)
+ [explorer]  perceive ─► LLM action ─► policy check ─► act ─► evidence diff
+      │                           ▲                         │
+      └──── history / stuck checks ────────────────────────┘
       │
       ▼
- [validator] every locator and assertion checked against what was seen     (locator check: built)
+ ExplorationReport ──► JSON report + replayable Playwright steps
       │
       ▼
- [compiler] ─► Playwright tests ─► [runner] ─► Pass / Fail + evidence      (planned; Step.code() built)
+ [designer / compiler / runner]  (planned)
 ```
 
 Design choices:
 
-- **Text only, no vision.** The model reads the accessibility tree plus DOM attributes, which is cheap and works with free-tier models.
-- **The model acts on ids, tests replay locators.** Every action resolves to a unique Playwright locator on the live page, and that same locator is what a generated test will use. A step that worked during exploration will replay.
-- **Safety is plain code.** A policy module decides what may run. It never asks the model.
-- **Remote browsers are supported.** Connect to any Chromium over CDP.
+- **Text only, no vision.** The model receives the accessibility tree and DOM-derived controls, headings and visible text. It does not receive screenshots.
+- **Backend-node ids are short-lived refs.** The model chooses an id from the latest observation. The browser verifies that id against a live locator before acting.
+- **The model acts on ids, while evidence stays replayable.** Successful actions are recorded as `Step`s and rendered as Playwright Python code.
+- **Safety is plain code.** Policy checks precede actions; the model cannot override payment, password, card or host restrictions.
+- **Evidence is observation-derived.** Reports and summaries are based on recorded browser changes, not model claims.
+- **Remote browsers are supported.** Local Chromium is the default; CDP can connect to an existing Chromium instance.
 
 ## Quick start
 
-Requires Python 3.11+.
+Requires Python 3.11+ and a Playwright Chromium installation.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python -m playwright install chromium
 cp .env.example .env
+# Add a key for Gemini, Groq or OpenAI, then:
+test-pilot llm
 test-pilot observe https://phptravels.net/ --locators
+test-pilot explore https://phptravels.net/ "Search for a flight from Pune to Delhi"
 ```
 
 ## Configuration
 
-Copy `.env.example` to `.env` (it must stay out of git).
+Copy `.env.example` to `.env`. Keep secrets out of source control.
 
 | Variable | Purpose |
 |---|---|
-| `TEST_PILOT_CDP_URL` | CDP endpoint of a remote Chromium. Leave empty to launch one locally. |
-| `LLM_PROVIDER`, `LLM_MODEL`, `GEMINI_API_KEY`, `GROQ_API_KEY` | Reserved for the explorer loop (commented out for now). |
+| `TEST_PILOT_CDP_URL` | CDP endpoint of an existing Chromium. Leave empty to launch Chromium locally. |
+| `LLM_PROVIDER` | `gemini` (default), `groq`, or `openai`. |
+| `LLM_MODEL` | Optional provider model override. |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY` | API key for the selected provider. |
+| `LLM_MAX_TOKENS` | Maximum response tokens; default `4096`. |
+| `LLM_REASONING_EFFORT` | Optional `none`, `minimal`, `low`, `medium`, or `high`. |
+| `LLM_TEMPERATURE` | Sampling temperature; ignored by OpenAI reasoning models. |
+| `LLM_MAX_CALLS` | Optional model-call budget for a run. |
+| `LLM_BASE_URL` | Optional OpenAI-compatible endpoint override. |
 
 ## Command line
 
 ```bash
-test-pilot observe <url> [--headed] [--cdp-url URL] [--max-chars N] [--json] [--locators]
+test-pilot observe <url> [--headed] [--cdp-url URL] [--max-chars N] [--full] [--json] [--locators]
+test-pilot llm [--provider gemini|groq|openai] [--model MODEL] [--models]
+test-pilot explore <url> "<requirement>" [--provider PROVIDER] [--model MODEL] [--max-steps N] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL] [--quiet]
 ```
 
-Prints the page exactly as the model will see it. `--locators` also prints a verified, unique Playwright locator for each control and marks `.nth()` fallbacks as fragile. `--json` prints the full `Observation`.
+- `observe` prints the text the model would receive. `--locators` verifies one Playwright locator per control.
+- `llm` validates the provider configuration with a tiny structured call. `--models` lists models accessible to the configured key.
+- `explore` runs the bounded LLM/browser loop and writes an `ExplorationReport` JSON file under `artifacts/` by default.
 
 ## Using it from Python
 
@@ -69,15 +96,14 @@ from test_pilot.actions import Actor, Click, Type
 from test_pilot.policy import Policy
 
 url = "https://phptravels.net/"
-with BrowserSession() as s:
-    s.goto(url)
-    actor = Actor(s, Policy(start_url=url))
-    print(actor.look())                          # the page as the model sees it
-    result = actor.act(Click(id=89))             # ids come from the last look
-    print(result.status, result.message)         # ok | failed | blocked | stopped
-    print([step.code() for step in actor.steps]) # Playwright code for what was done
+with BrowserSession() as session:
+    session.goto(url)
+    actor = Actor(session, Policy(start_url=url))
+    print(actor.look())
+    result = actor.act(Click(id=89))
+    print(result.status, result.message)
+    print([step.code() for step in actor.steps])
 ```
-As given in tests/try.py
 
 ## What the model sees
 
@@ -147,56 +173,48 @@ These are regex and structure rules, deliberately simple and readable. Edit `FIN
 
 For each element the candidates are tried in this order: role + name, label, placeholder, test id, text, then CSS (`id`, `name`, `data-test*`) as a last resort. Machine-generated ids (`promo-8f3a9c21d4e5`, `:r1:`, `ui-id-3`) are never used. Each candidate is counted on the live page, and the first unique one wins. For duplicates the order is: narrow with `.filter(visible=True)`, then `.nth(i)` marked fragile.
 
-## Project layout
-
-Files live directly in `src/` and are installed as the package `test_pilot` (see `[tool.setuptools.package-dir]` in `pyproject.toml`).
-
-| File | Job |
-|---|---|
-| `perceive.py` | Accessibility tree + DOM + visible text → `Observation`; clickables; dialog hoisting |
-| `watch.py` | DOM and network settling, and "navigated / page changed / no change" |
-| `locators.py` | Candidates, live uniqueness check, visible and `.nth` fallbacks (`ensure_locator`) |
-| `render.py` | Observation → prompt text, budget tiers, head+tail truncation |
-| `browser.py` | Local or remote (CDP) Chromium, URL validation, dialog handling |
-| `actions.py` | Action models, `Actor`, `Step`, `ActionResult` |
-| `policy.py` | Allowed host, final-step and sensitive-field rules, action budget |
-| `models.py` | Pydantic models (`Observation`, `Element`, `Locator`) and the page-type `signature()` |
-| `roles.py`, `text.py` | Role tables and text helpers (icon cleaning, quoting) |
-| `cli.py` | `test-pilot observe` |
-
 ## Tests
 
+Use the project environment if packages are not on your shell's default `PATH`:
+
 ```bash
-pytest
+pytest -q
+# or
+conda run -n tp pytest -q
 ```
 
-The suite (84 tests at this milestone) runs against local fixture sites and a standalone Chromium over CDP. No internet is needed. Fixtures live in `tests/fixtures/`. `flight.html` and `hotels.html` are simple forms, `portal.html` reproduces what was found on a real travel site (div widgets, a modal last in the DOM, duplicate buttons, repeated cards), and `checkout.html` covers payment, delete and off-site cases.
+The suite runs against local fixture sites and a standalone Chromium over CDP. No external internet is needed by the fixtures. Fixtures live in `tests/fixtures/`; `flight.html` and `hotels.html` cover form behavior, `portal.html` covers div widgets and modal/duplicate-card cases, and `checkout.html` covers payment, destructive and off-site cases.
+
+The suite currently contains 198 tests. The latest local run has 195 passing and 3 failing perception/action tests that are being investigated; see `pytest -q` for details.
 
 ## Known limitations
 
+- **No test compiler or runner yet.** Exploration reports contain replayable steps and evidence, but Playwright test suites are not generated or executed here yet.
 - **Cross-origin iframes** are not read.
-- **Custom calendars and pickers** are operated through clicks (open it, look again, click the day). Not yet verified end to end on a real site.
+- **Custom calendars and pickers** rely on the model opening the widget and choosing individual controls. They are most reliable for native date inputs.
 - **`.nth()` locators** depend on page order and are marked fragile.
-- **Heuristics** can misfire. Examples: a lone lowercase word of four or more letters is treated as an icon name, clickables come from listeners and `cursor:pointer`, and a blocking dialog needs a z-index or `role=dialog` to be detected.
-- **Login and CAPTCHA** are not handled. The policy stops at password fields.
-- **No LLM yet.** The explorer loop, designer, validator and runner are not built.
+- **Heuristics** can misfire. Blocking dialogs, icon text and custom clickable widgets depend on accessible roles, z-indexes, listeners and DOM structure.
+- **Login and CAPTCHA** are not handled. The policy stops at passwords and human-only steps.
+- **Model summaries are diagnostic only.** The report's primary summary is rebuilt from browser events and observed validation messages.
+- **LLM usage** depends on provider availability and API credentials; browser fixture tests do not require an LLM.
 
 ## Development log
 
-1. **Perception core.** Accessibility-tree text with ids, DOM attributes, a visible-text filter, native select and date handling, password masking, remote Chromium over CDP, settle and change detection, unique-locator check, 31 tests.
-2. **First real-site fixes** (phptravels): `clickable` detection for div widgets, blocking-dialog hoisting, no repeated card text, budget tiers that drop prose before controls, `.filter(visible=True)` and `.nth()` locator fallbacks.
-3. **Second real-site fixes:** icon-font name cleaning (leading and trailing) with icon-free locators, dialog prose never dropped, one-line `ensure_locator` for single elements.
-4. **Actions and safety:** `Actor` with click, type, select, press, scroll, wait and go-back; `Policy` with host scope, final-step and sensitive-field stops, budget; `Step.code()` that replays; 84 tests.
+1. **Perception core:** accessibility-tree text with ids, DOM attributes, visible-text filtering, native select/date handling, password masking, settle/change detection and unique locators.
+2. **Real-site resilience:** custom `clickable` widgets, blocking-dialog hoisting, repeated-card filtering, token-budget tiers and view-only prompts.
+3. **Locator improvements:** icon-font name cleaning, icon-free locator variants, visible filtering and marked `.nth()` fallbacks.
+4. **Actions and safety:** `Actor` with click/type/select/press/scroll/wait/go-back; allowed-host and sensitive-action policy; replayable `Step.code()`.
+5. **Evidence extraction:** observation diffs for navigation, appeared/disappeared text, alerts and native validation messages.
+6. **LLM support:** one OpenAI-compatible client for Gemini, Groq and OpenAI, with structured JSON repair, retries, call budgets and usage accounting.
+7. **Requirement analysis and exploration:** bounded end-to-end browser loops, valid-first behavior, validation probing, stuck/failure/time/action budgets, deterministic reports and JSON artifacts.
 
 ## Roadmap
 
-1. **Evidence extraction:** an observation diff (new headings and text after an action), native `validationMessage` capture, and form schemas built from observations.
-2. **Explorer loop:** LLM client, requirement analyzer, bounded loop with stuck detection and budgets.
-3. **Test designer:** 4–5 valid and invalid cases with assertions, in a constrained JSON format.
-4. **Validator and compiler:** every locator and assertion checked against what was seen, then rendered as Playwright tests with relative dates.
-5. **Runner and report:** Passed, Failed or Blocked with expected and actual results, plus screenshots and traces.
-6. **Optional:** a per-site graph cache for faster repeat runs, and Kubernetes deployment.
+1. **Test designer:** 4–5 valid and invalid cases with assertions in a constrained schema.
+2. **Validator and compiler:** verify locators and assertions against collected evidence, then render Playwright tests with relative dates.
+3. **Runner and report:** Passed, Failed or Blocked outcomes with expected/actual results, screenshots and traces.
+4. **Optional:** per-site graph caching for faster repeat runs and Kubernetes deployment.
 
 ## Credits
 
-The perception approach follows ideas from Browser Use's `ax.py` (backend node ids as element refs, visible-text filtering, native select and date handling, new-element marks). The code is a separate implementation on Playwright's CDP session.
+The perception approach follows ideas from Browser Use's `ax.py` (backend-node ids as element refs, visible-text filtering, native select/date handling and new-element marks). The implementation is separate and uses Playwright's CDP session.
