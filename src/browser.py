@@ -35,6 +35,7 @@ class BrowserConfig:
     viewport: tuple[int, int] = (1280, 800)
     nav_timeout_ms: int = 30_000
     dialog_policy: str = "accept"
+    maximize: bool = True
 
 
 class BrowserSession:
@@ -58,10 +59,21 @@ class BrowserSession:
             self._context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
             self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
-            self._browser = self._pw.chromium.launch(headless=c.headless)
-            self._context = self._browser.new_context(viewport={"width": c.viewport[0], "height": c.viewport[1]})
+            args = ["--start-maximized"] if c.maximize and not c.headless else []
+            self._browser = self._pw.chromium.launch(headless=c.headless, args=args)
+            self._context = self._browser.new_context(no_viewport=True)
             self.page = self._context.new_page()
         self.page.set_default_timeout(c.nav_timeout_ms)
+        if c.maximize and not c.headless:
+            try:
+                size = self.page.evaluate("() => [screen.availWidth || innerWidth, screen.availHeight || innerHeight]")
+                if isinstance(size, list) and len(size) == 2:
+                    width, height = int(size[0]), int(size[1])
+                    if width > 0 and height > 0:
+                        self.page.set_viewport_size({"width": width, "height": height})
+                        c.viewport = (width, height)
+            except Exception:
+                pass
         self.page.on("dialog", self._on_dialog)
         self.watcher = PageWatcher(self.page)
         self.cdp = self._context.new_cdp_session(self.page)

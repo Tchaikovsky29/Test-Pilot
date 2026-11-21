@@ -187,7 +187,7 @@ class LLM:
             raise LLMError(f"{p.name} ran out of tokens before answering (reasoning models think first): "
                            "raise LLM_MAX_TOKENS or set LLM_REASONING_EFFORT=low")
         if not text:
-            raise LLMError(f"{p.name} returned an empty reply (finish_reason={choice.finish_reason})")
+            raise LLMTransientError(f"{p.name} returned an empty reply (finish_reason={choice.finish_reason})")
         return text
 
     def structured(self, messages: list[dict], schema: type[T] | TypeAdapter, *, max_repairs: int = 1) -> T:

@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from .models import Observation
 from .text import clip, fold
 
-MAX_LINES = 8
+MAX_LINES = 8  # per kind, in what the model reads; `Changes` itself keeps everything for the test designer
 MAX_LEN = 140
 
 
@@ -74,7 +74,8 @@ def render_changes(ch: Changes) -> str:
             out.append(f"{prefix} (… {len(items) - MAX_LINES} more)")
 
     block("+", ch.appeared)
-    block("-", ch.disappeared)
+    if ch.disappeared:  # the model sees the new page anyway; what is gone is evidence for the designer, not for the next step
+        out.append(f"- ({len(ch.disappeared)} text line{'s' if len(ch.disappeared) > 1 else ''} gone)")
     block("!", ch.alerts)
     block("error:", ch.errors)
     out.append("[/changes]")

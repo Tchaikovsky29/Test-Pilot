@@ -196,3 +196,17 @@ def test_clean_name(raw, clean):
 ])
 def test_is_icon_text(text, icon):
     assert is_icon_text(text) is icon
+
+
+def test_autocomplete_fields_are_marked(flight):
+    flight.page.evaluate("document.querySelector('#from').setAttribute('aria-autocomplete', 'list')")
+    from_element = next(e for e in flight.observe().elements if e.name == "From")
+    assert "autocomplete" in from_element.states
+
+
+def test_city_and_readonly_date_fields_are_marked(flight):
+    flight.page.evaluate("document.querySelector('#from').setAttribute('placeholder', 'City or airport')")
+    obs = flight.observe()
+    by_name = {e.name: e for e in obs.elements}
+    assert "autocomplete" in by_name["From"].states
+    assert "date-picker" in by_name["Departure date"].states

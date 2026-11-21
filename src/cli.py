@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -30,7 +32,7 @@ def _observe(args) -> int:
         with BrowserSession(cfg) as s:
             s.goto(args.url)
             obs = s.observe()
-            print(obs.model_dump_json(indent=2) if args.json else render(obs, args.max_chars))
+            print(obs.model_dump_json(indent=2) if args.json else render(obs, args.max_chars, window=not args.full))
             if args.locators:
                 print(f"\npage signature: {obs.signature()}\n")
                 elems = [e for e in obs.elements if e.widget not in ("link", "option")]
@@ -89,7 +91,10 @@ def _explore(args) -> int:
     with BrowserSession(bcfg) as s:
         report = explore(s, llm, args.url, args.requirement, max_steps=args.max_steps, max_seconds=args.max_seconds,
                          on_event=None if args.quiet else _print_event)
-    report.save(args.out)
+    output = _report_output(args)
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    report.save(str(output_path))
     print(f"\nstopped: {report.stop_reason}" + (f" ({report.stop_detail})" if report.stop_detail else ""))
     if report.plan_problem:
         print(f"note: the plan step failed, so the raw requirement was used: {report.plan_problem}")
@@ -100,8 +105,17 @@ def _explore(args) -> int:
     print(f"{len(report.events)} action(s), {len(report.pages)} page type(s), {report.usage}, {report.elapsed_s}s")
     print("steps that worked:")
     print("\n".join(f"    {c}" for c in report.code) or "    (none)")
-    print(f"report written to {args.out}")
+    print(f"report written to {output_path}")
     return 0 if report.stop_reason in ("done", "needs_person", "max_steps") else 1
+
+
+def _report_output(args) -> str:
+    if args.out:
+        return args.out
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    path = Path("artifacts") / f"{stamp}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     ob.add_argument("--headed", action="store_true", help="show the browser window")
     ob.add_argument("--cdp-url", help="connect to a remote Chromium (default: env TEST_PILOT_CDP_URL, else launch locally)")
     ob.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    ob.add_argument("--full", action="store_true", help="list the whole page, not just the part near the viewport")
     ob.add_argument("--json", action="store_true", help="print the full Observation as JSON")
     ob.add_argument("--locators", action="store_true", help="also print a verified, unique locator for each control")
 
@@ -123,12 +138,12 @@ def main(argv: list[str] | None = None) -> int:
 
     ex = sub.add_parser("explore", help="explore a web app against a requirement and write an evidence report")
     ex.add_argument("url")
-    ex.add_argument("requirement", help='for example "Book a flight from Pune to Delhi"')
+    ex.add_argument("requirement", help='for example "Search for a product under $50"')
     ex.add_argument("--provider", choices=sorted(PROVIDERS), help="default: env LLM_PROVIDER, else gemini")
     ex.add_argument("--model")
     ex.add_argument("--max-steps", type=int, default=25)
     ex.add_argument("--max-seconds", type=float, default=300)
-    ex.add_argument("--out", default="exploration.json", help="where to write the report (default: exploration.json)")
+    ex.add_argument("--out", default=None, help="optional report path (default: artifacts/<UTC timestamp>.json)")
     ex.add_argument("--headed", action="store_true", help="show the browser window")
     ex.add_argument("--cdp-url", help="connect to a remote Chromium")
     ex.add_argument("-q", "--quiet", action="store_true", help="do not print each step")

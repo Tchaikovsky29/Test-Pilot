@@ -62,12 +62,14 @@ def run(session, base_url):
 def test_valid_then_invalid_flow_is_recorded_with_evidence(run):
     llm = Script(click("Search"), type_("City", "Pune"), click("Search"), DONE)
     r = run(llm)
-    assert r.stop_reason == "done" and r.summary == "explored" and len(r.events) == 3
+    assert r.stop_reason == "done" and r.model_summary == "explored"
+    assert "clicked" in r.summary and "fill(\"Pune\")" not in r.summary
+    assert len(r.events) == 3
     empty, typed, valid = r.events
     assert empty.status == "ok" and empty.changes.errors and "City:" in empty.changes.errors[0]    # the bad-input probe
     assert "Searching" in valid.changes.appeared and "Looking for trips to Pune" in valid.changes.appeared
     assert r.code == ['page.get_by_role("button", name="Search", exact=True).click()',
-                      'page.get_by_role("textbox", name="City", exact=True).fill("Pune")',
+                      'page.get_by_role("textbox", name="City", exact=True).press_sequentially("Pune")',
                       'page.get_by_role("button", name="Search", exact=True).click()']
     assert len(r.steps) == 3 and r.steps[1]["value"] == "Pune"
 

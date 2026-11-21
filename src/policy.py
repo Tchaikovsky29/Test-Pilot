@@ -53,6 +53,7 @@ class Policy:
     start_url: str
     max_actions: int = 40
     allowed_hosts: set[str] = field(default_factory=set)
+    allow_external_links: bool = False
 
     def __post_init__(self) -> None:
         if not self.allowed_hosts:
@@ -65,7 +66,7 @@ class Policy:
         return any(h == a or h.endswith("." + a) for a in self.allowed_hosts)
 
     def check_url(self, url: str) -> Verdict:
-        if self.host_allowed(url):
+        if self.host_allowed(url) or self.allow_external_links:
             return Verdict()
         return Verdict(ok=False, reason=f"{_host(url)} is outside the allowed site ({', '.join(sorted(self.allowed_hosts))})")
 
@@ -73,7 +74,7 @@ class Policy:
         if e.role == "link" and e.href and not e.href.startswith("/"):
             # short hrefs carry a host only when it differs from the page's own: "partner.example.com/deals"
             host = _host(e.href.split("/", 1)[0])
-            if host and not self.host_allowed(host):
+            if host and not self.host_allowed(host) and not self.allow_external_links:
                 return Verdict(ok=False, reason=f'the link "{e.display_name}" leads to {host}, outside the allowed site')
         label = f"{e.display_name} {e.description}"
         if e.widget in ACTIONABLE_FOR_FINAL and FINAL_STEP.search(label):

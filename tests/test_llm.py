@@ -2,11 +2,13 @@
 import http.server
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
 
 from test_pilot.cli import main as cli_main
+from test_pilot.cli import _report_output
 from test_pilot.llm import LLM, PROVIDERS, LLMConfig, LLMConfigError, LLMError, LLMTransientError, extract_json
 
 
@@ -315,6 +317,21 @@ def test_cli_llm_check_without_a_key(monkeypatch, capsys):
     monkeypatch.chdir("/tmp")                                       # no .env to pick up
     assert cli_main(["llm", "--provider", "openai"]) == 1
     assert "OPENAI_API_KEY" in capsys.readouterr().err
+
+
+def test_report_output_defaults_to_timestamped_artifacts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    first = _report_output(SimpleNamespace(out=None))
+    second = _report_output(SimpleNamespace(out=None))
+    assert first.startswith("artifacts/") and first.endswith(".json")
+    assert second.startswith("artifacts/") and second.endswith(".json")
+    assert first != second
+
+
+def test_report_output_honors_explicit_out(tmp_path):
+    custom = tmp_path / "my-report.json"
+    assert _report_output(SimpleNamespace(out=str(custom))) == str(custom)
+
 
 # ---- the provider's own JSON check (Groq's json_validate_failed) ---------------------------------------------------
 

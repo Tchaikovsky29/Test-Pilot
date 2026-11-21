@@ -80,6 +80,8 @@ class Line(BaseModel):
     kind: Literal["heading", "text", "control", "frame", "overlay", "alert"]
     text: str = ""
     element_id: int | None = None
+    x: float | None = None  # left and top edge in document coordinates; None = unknown, so always listed
+    y: float | None = None
 
 
 _VARIABLE = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f-]{27}")
@@ -95,6 +97,10 @@ class Observation(BaseModel):
     pending_requests: int = 0
     nav_error: str | None = None
     blocked: bool = False  # a modal dialog covers the page: its lines come first
+    modal: bool = False  # ...and it is a real modal (role=dialog / aria-modal / <dialog>): the page behind it is unusable
+    scroll_y: float = 0.0  # where the viewport sits in the document
+    viewport_w: float = 0.0
+    viewport_h: float = 0.0  # 0 = unknown: the view is not windowed
 
     @property
     def by_id(self) -> dict[int, Element]:

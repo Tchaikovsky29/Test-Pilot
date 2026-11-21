@@ -62,12 +62,12 @@ def test_typing_into_a_button_is_explained(make):
     assert r.status == "failed" and "use click" in r.message
 
 
-def test_readonly_field_points_to_the_picker(make):
+def test_readonly_field_accepts_iso_date(make):
     a = make("/portal.html")
     a.act(Click(id=find(a, "I Understand & Continue")))
     a.look()
     r = a.act(Type(id=find(a, "Check-in"), text="2026-12-19"))
-    assert r.status == "failed" and "read-only" in r.message and "click it" in r.message
+    assert r.status == "ok"
 
 
 def test_custom_dropdown_via_clickables(make):
@@ -176,7 +176,7 @@ def test_recorded_steps_replay_as_code(make):
     a.act(Select(id=find(a, "Cabin"), option="Business"))
     a.act(Click(id=find(a, "Search flights")))
     code = [s.code() for s in a.steps]
-    assert code[0] == 'page.get_by_role("textbox", name="From", exact=True).fill("DEL")'
+    assert code[0] == 'page.get_by_role("textbox", name="From", exact=True).press_sequentially("DEL")'
     assert code[1] == 'page.get_by_role("combobox", name="Cabin", exact=True).select_option(label="Business")'
     assert code[2] == 'page.get_by_role("button", name="Search flights", exact=True).click()'
     page = a.session.page
@@ -196,3 +196,20 @@ def test_parse_action():
         parse_action({"kind": "format_disk"})
     with pytest.raises(Exception):
         parse_action({"kind": "click"})                                       # id is required
+
+
+def test_typing_an_autocomplete_uses_keys(make):
+    a = make()
+    a.session.page.evaluate("document.querySelector('#from').setAttribute('aria-autocomplete', 'list')")
+    a.look()
+    r = a.act(Type(id=find(a, "From"), text="DEL"))
+    assert r.ok and r.step.keys is True
+    assert r.step.code().endswith('press_sequentially("DEL")')
+
+
+def test_explorer_policy_allows_user_external_links(make):
+    a = make()
+    verdict = Policy(start_url=a.session.page.url, allow_external_links=True).check_click(
+        next(e for e in a.obs.elements if e.display_name == "Partner deals")
+    )
+    assert verdict.ok

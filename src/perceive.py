@@ -17,7 +17,7 @@ from urllib.parse import urljoin, urlparse
 from playwright.sync_api import CDPSession
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
-from .text import clip, fold, is_icon_text, norm
+from .text import is_icon_text
 from .locators import candidates
 from .models import Element, Line, Observation
 from .roles import BLOCKS, CHECKABLE, CONTROLS, DATE_INPUT_TYPES, NATIVE_INPUT_ROLES
@@ -52,7 +52,7 @@ VISIBLE_JS = r"""() => {
 OVERLAY_JS = r"""(() => {
   const w = innerWidth, h = innerHeight;
   const isOverlay = (e) => {
-    if (e.matches('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open]')) return true;
+    if (e.matches('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open],platform-popup,[is=popup],[class*=popup],[class*=overlay],[class*=modal]')) return true;
     const cs = getComputedStyle(e);
     if (cs.position !== 'fixed' || !(parseInt(cs.zIndex, 10) > 0)) return false;
     const r = e.getBoundingClientRect();
@@ -104,6 +104,34 @@ def find_clickables(snapshot: dict, viewport_area: float) -> set[int]:
                 continue  # invisible specks, and page-sized wrappers with delegated handlers
             out.add(backend[ni])
     return out
+
+
+def layout_positions(snapshot: dict) -> tuple[dict[int, tuple[float, float]], float]:
+    """backendNodeId -> (left, top) in document coordinates, and the main document's scroll offset. Only the main
+    document: nodes of iframes are absent, so their lines have no position and are always listed."""
+    docs = snapshot.get("documents") or []
+    if not docs:
+        return {}, 0.0
+    doc = docs[0]
+    backend = (doc.get("nodes") or {}).get("backendNodeId") or []
+    pos: dict[int, tuple[float, float]] = {}
+    layout = doc.get("layout") or {}
+    for ni, box in zip(layout.get("nodeIndex") or [], layout.get("bounds") or []):
+        if 0 <= ni < len(backend) and len(box) >= 2 and backend[ni] not in pos:
+            pos[backend[ni]] = (float(box[0]), float(box[1]))
+    return pos, float(doc.get("scrollOffsetY") or 0)
+
+
+def _fill_positions(lines: list[Line]) -> None:
+    """Lines whose node has no layout box (plain text, mostly) take the position of the line before them."""
+    last: tuple[float | None, float | None] = (None, None)
+    for ln in lines:
+        if ln.kind not in ("text", "heading", "control"):
+            continue
+        if ln.x is None and ln.y is None:
+            ln.x, ln.y = last
+        else:
+            last = (ln.x, ln.y)
 
 
 @dataclass
@@ -181,7 +209,8 @@ class _FrameWalker:
 
     def __init__(self, nodes: list[dict], dom: dict[int, DomInfo], visible: str | None, page_url: str,
                  frame_url: str, previous: set[int] | None, lines: list[Line], elements: list[Element],
-                 clickables: set[int] | None = None, overlay: int | None = None):
+                 clickables: set[int] | None = None, overlay: int | None = None,
+                 tops: dict[int, tuple[float, float]] | None = None):
         self.by_id = {n["nodeId"]: n for n in nodes}
         self.dom, self.visible, self.page_url, self.frame_url = dom, visible, page_url, frame_url
         self.previous, self.lines, self.elements = previous, lines, elements
@@ -189,26 +218,32 @@ class _FrameWalker:
         self.clickables, self.overlay = clickables or set(), overlay
         self.overlay_lines: list[Line] | None = None  # lines of the blocking dialog, hoisted by the caller
         self.in_control = 0  # >0 while inside a listed control: nothing nested becomes a "clickable"
+        self.tops = tops or {}
+        self.text_pos: tuple[float, float] | None = None  # where the first text node of the pending line sits
+        self.in_overlay = False
+        self.overlay_hard = False  # the overlay holds role=dialog / aria-modal / <dialog>: the page behind is unusable
 
     def flush(self) -> None:
         if not self.text:
             return
         t = norm(" ".join(self.text))
         self.text.clear()
+        pos, self.text_pos = self.text_pos, None
         if not t or is_icon_text(t):
             return  # empty, or just an icon-font glyph name such as "vpn_key"
         last = self.elements[-1] if self.elements else None
         if self.lines and self.lines[-1].kind == "control" and last and fold(t) in (fold(last.name), fold(last.description)):
             return  # a label printed after its control, which already carries it as its name
-        self.lines.append(Line(kind="text", text=clip(t, 300)))
+        self.lines.append(self._line("text", pos, text=clip(t, 300)))
 
     def walk(self, node: dict, inside: str) -> None:
         bid = node.get("backendDOMNodeId")
-        if bid is not None and self.overlay is not None and bid == self.overlay and not getattr(self, "in_overlay", False):
+        if bid is not None and self.overlay is not None and bid == self.overlay and not self.in_overlay:
             self.flush()
             saved_lines = self.lines
             self.lines = []
             self.in_overlay = True
+            self._note_modal(node)
             kids = [self.by_id.get(c) for c in node.get("childIds") or []]
             for c in kids:
                 if c:
@@ -222,6 +257,7 @@ class _FrameWalker:
         role = "" if role is None else str(role)
         name = norm(_val(node.get("name")))
         kids = [self.by_id.get(c) for c in node.get("childIds") or []]
+        self._note_modal(node)
         if node.get("ignored"):
             for c in kids:
                 self.walk(c, inside)
@@ -230,12 +266,14 @@ class _FrameWalker:
             t = fold(name)
             if t and t not in inside and (self.visible is None or t in self.visible):
                 self.text.append(name)
+                if self.text_pos is None:
+                    self.text_pos = self._pos(node.get("backendDOMNodeId"))
             return
         if role == "heading" and name and fold(name) in inside:
             return  # already said by the card link or control that contains it
         if role == "heading" and name:
             self.flush()
-            self.lines.append(Line(kind="heading", text=name))
+            self.lines.append(self._line("heading", self._pos(node.get("backendDOMNodeId")), text=name))
             for c in kids:
                 self.walk(c, fold(name))
             self.flush()
@@ -251,10 +289,14 @@ class _FrameWalker:
         value = norm(_val(node.get("value")))
         focusable = _prop(node, "focusable") and role != "RootWebArea" and (name or value or _prop(node, "editable"))
         is_control = bid is not None and (role in CONTROLS or role in NATIVE_INPUT_ROLES or bool(focusable))
+        month_grid_name = bool(name and ("SU MO TU WE TH FR SA" in name or "MON TUE WED THU FRI SAT SUN" in name.upper()))
+        if month_grid_name:
+            is_control = False
         widget_override = None
         if not is_control and bid in self.clickables and self.in_control == 0 and not self._has_control(node):
             label = name or self._subtree_text(node)
-            if label and len(label) <= MAX_CLICKABLE_TEXT:
+            month_grid = bool(label and ("SU MO TU WE TH FR SA" in label or "MON TUE WED THU FRI SAT SUN" in label.upper()))
+            if label and len(label) <= MAX_CLICKABLE_TEXT and not month_grid and not month_grid_name:
                 is_control, name, widget_override = True, label, "clickable"
         if not is_control:
             if role in BLOCKS:
@@ -271,7 +313,7 @@ class _FrameWalker:
             self.lines.pop()  # its label, printed as its name
         el = self._element(node, role, name, value, bid, info, widget_override)
         self.elements.append(el)
-        self.lines.append(Line(kind="control", element_id=el.id))
+        self.lines.append(self._line("control", self._pos(bid), element_id=el.id))
         if el.widget in ("select", "date", "file") or role in NATIVE_INPUT_ROLES:
             return  # children are the browser's own widget parts
         # Only what the line showed counts as said, except for links and clickables: a card link's long text is
@@ -283,6 +325,21 @@ class _FrameWalker:
             self.walk(c, inside)
         self.in_control -= 1
         self.flush()
+
+    def _pos(self, bid: int | None) -> tuple[float, float] | None:
+        return self.tops.get(bid) if bid is not None else None
+
+    def _line(self, kind: str, pos: tuple[float, float] | None = None, **kw) -> Line:
+        x, y = pos if pos else (None, None)
+        return Line(kind=kind, x=x, y=y, **kw)
+
+    def _note_modal(self, node: dict) -> None:
+        if not self.in_overlay or self.overlay_hard:
+            return
+        bid = node.get("backendDOMNodeId")
+        d = self.dom.get(bid) if bid is not None else None
+        if _val(node.get("role")) in ("dialog", "alertdialog") or (d and (d.tag == "DIALOG" or d.attrs.get("aria-modal") == "true")):
+            self.overlay_hard = True
 
     def _subtree_text(self, node: dict) -> str:
         parts: list[str] = []
@@ -304,67 +361,6 @@ class _FrameWalker:
                 return True
             stack.extend(self.by_id[c] for c in n.get("childIds") or [] if c in self.by_id)
         return False
-
-    def _walk(self, node: dict, inside: str) -> None:
-        role = _val(node.get("role"))
-        role = "" if role is None else str(role)
-        name = norm(_val(node.get("name")))
-        kids = [self.by_id.get(c) for c in node.get("childIds") or []]
-        if node.get("ignored"):
-            for c in kids:
-                self.walk(c, inside)
-            return
-        if role == "StaticText":
-            t = fold(name)
-            if t and t not in inside and (self.visible is None or t in self.visible):
-                self.text.append(name)
-            return
-        if role == "heading" and name and fold(name) in inside:
-            return  # already said by the card link or control that contains it
-        if role == "heading" and name:
-            self.flush()
-            self.lines.append(Line(kind="heading", text=name))
-            for c in kids:
-                self.walk(c, fold(name))
-            self.flush()
-            return
-        bid = node.get("backendDOMNodeId")
-        info = self.dom.get(bid) if bid is not None else None
-        value = norm(_val(node.get("value")))
-        focusable = _prop(node, "focusable") and role != "RootWebArea" and (name or value or _prop(node, "editable"))
-        is_control = bid is not None and (role in CONTROLS or role in NATIVE_INPUT_ROLES or bool(focusable))
-        widget_override = None
-        if not is_control and bid in self.clickables and self.in_control == 0 and not self._has_control(node):
-            label = name or self._subtree_text(node)
-            if label and len(label) <= MAX_CLICKABLE_TEXT:
-                is_control, name, widget_override = True, label, "clickable"
-        if not is_control:
-            if role in BLOCKS:
-                self.flush()
-                for c in kids:
-                    self.walk(c, inside)
-                self.flush()
-            else:
-                for c in kids:
-                    self.walk(c, inside)
-            return
-        self.flush()
-        if self.lines and self.lines[-1].kind == "text" and self.lines[-1].text.lower() == name.lower():
-            self.lines.pop()  # its label, printed as its name
-        el = self._element(node, role, name, value, bid, info, widget_override)
-        self.elements.append(el)
-        self.lines.append(Line(kind="control", element_id=el.id))
-        if el.widget in ("select", "date", "file") or role in NATIVE_INPUT_ROLES:
-            return  # children are the browser's own widget parts
-        # Only what the line showed counts as said, except for links and clickables: a card link's long text is
-        # repeated by its heading and paragraph inside, and printing it again only burns the budget.
-        shown = name if (role == "link" or widget_override) else clip(name, 150)
-        inside = fold(f"{inside} {shown} {value}")
-        self.in_control += 1
-        for c in kids:
-            self.walk(c, inside)
-        self.in_control -= 1
-        self.flush()
 
     def _element(self, node: dict, role: str, name: str, value: str, bid: int, info: DomInfo | None,
                  widget_override: str | None = None) -> Element:
@@ -390,6 +386,18 @@ class _FrameWalker:
         required = bool(_prop(node, "required")) or "required" in attrs
         invalid = attrs.get("aria-invalid", "").lower() in ("true", "grammar", "spelling")
         native_disabled = "disabled" in attrs and tag in ("INPUT", "SELECT", "BUTTON", "TEXTAREA", "OPTION", "FIELDSET")
+        is_readonly = bool(_prop(node, "readonly")) or "readonly" in attrs
+        is_autocomplete = (
+            role in ("combobox", "searchbox")
+            or bool(attrs.get("aria-autocomplete") and attrs.get("aria-autocomplete") != "none")
+            or bool(attrs.get("aria-haspopup") and attrs.get("aria-haspopup") != "false")
+            or bool(attrs.get("aria-controls") or attrs.get("aria-owns") or attrs.get("list"))
+            or attrs.get("autocomplete", "").lower() not in ("", "off")
+            or (widget in ("textbox", "searchbox") and any(word in fold(attrs.get("placeholder", "")) for word in (
+                "city", "airport", "location", "place", "address", "search",
+                "destination", "origin",
+            )))
+        )
         states = [
             s for s in [
                 "" if checked is None or role not in CHECKABLE else ("unchecked" if checked == "false" else "checked"),
@@ -397,9 +405,11 @@ class _FrameWalker:
                 "selected" if _prop(node, "selected") else "",
                 "required" if required else "",
                 "invalid" if invalid else "",
-                "readonly" if _prop(node, "readonly") else "",
+                "readonly" if is_readonly else "",
                 "disabled" if native_disabled or (_prop(node, "disabled") and not _prop(node, "focusable")) else "",
                 "focused" if _prop(node, "focused") else "",
+                "autocomplete" if is_autocomplete else "",
+                "date-picker" if (widget == "textbox" and is_readonly) or (widget == "date" and tag == "INPUT") else "",
             ] if s
         ]
         el = Element(
@@ -492,15 +502,17 @@ class Perceiver:
         except (PlaywrightError, KeyError):
             return {}
         
-    def _clickables(self) -> set[int]:
+    def _layout(self) -> tuple[set[int], dict[int, tuple[float, float]], float, tuple[float, float]]:
+        """(clickable node ids, node positions, scroll offset, viewport size) from one DOM snapshot."""
         try:
-            area = self.page.evaluate("() => innerWidth * innerHeight")
+            w, h = self.page.evaluate("() => [innerWidth, innerHeight]")
             snap = self.cdp.send("DOMSnapshot.captureSnapshot", {"computedStyles": ["cursor"]})
-            return find_clickables(snap, area)
-        except (PlaywrightError, KeyError, TypeError):
-            return set()  # perception degrades to accessibility-tree controls only
+            pos, scroll_y = layout_positions(snap)
+            return find_clickables(snap, w * h), pos, scroll_y, (float(w), float(h))
+        except (PlaywrightError, KeyError, TypeError, ValueError):
+            return set(), {}, 0.0, (0.0, 0.0)  # perception degrades: accessibility-tree controls only, no windowing
 
-    def observe(self, settle: bool = True) -> Observation:
+    def observe(self, settle: bool = True, remember=True) -> Observation:
         settled = self.watcher.settle(cap_ms=3000) if settle else {"probe": None, "pending": 0}
         info = settled.get("probe") or self._retry(lambda: self.page.evaluate("() => ({url: location.href, title: document.title})"))
         frames = self._capture()
@@ -509,21 +521,27 @@ class Perceiver:
             visible = self._retry(lambda: self.page.evaluate(VISIBLE_JS))
         except PlaywrightError:
             visible = None
-        clickables, overlay, invalid = self._clickables(), self._overlay_bid(), self._validation()
+        (clickables, tops, scroll_y, (view_w, view_h)), overlay, invalid = self._layout(), self._overlay_bid(), self._validation()
         lines: list[Line] = []
         elements: list[Element] = []
         hoisted: list[Line] = []
+        modal = False
+        if remember:
+            self._previous = {e.id for e in elements}
         for frame in frames:
             start = len(lines)
             # Text from a cross-origin frame is not in `visible`, so it is not filtered there.
             same_origin = not frame["url"] or _origin(frame["url"]) == _origin(info["url"]) or frame["url"] == "about:srcdoc"
             walker = _FrameWalker(frame["nodes"], dom, visible if same_origin else None, info["url"], frame["url"],
-                                  self._previous, lines, elements, clickables, overlay)
+                                  self._previous, lines, elements, clickables, overlay, tops)
             if frame["nodes"]:
                 walker.walk(frame["nodes"][0], "")
                 walker.flush()
+            if not frame["url"]:
+                _fill_positions(lines[start:])
             if walker.overlay_lines:
                 hoisted = walker.overlay_lines
+                modal = walker.overlay_hard
             if frame["url"] and len(lines) > start:
                 lines.insert(start, Line(kind="frame", text=frame["url"]))
         if hoisted:  # a modal dialog covers the page: show it first, whatever its place in the document
@@ -540,4 +558,5 @@ class Perceiver:
             nav_error = self.watcher.nav_failure or "unknown network error"
         dialogs, self.dialogs[:] = list(self.dialogs), []
         return Observation(url=info["url"], title=info["title"], lines=lines, elements=elements, dialogs=dialogs,
-                           pending_requests=settled.get("pending", 0), nav_error=nav_error, blocked=bool(hoisted))
+                           pending_requests=settled.get("pending", 0), nav_error=nav_error, blocked=bool(hoisted),
+                           modal=bool(hoisted) and modal, scroll_y=scroll_y, viewport_w=view_w, viewport_h=view_h)

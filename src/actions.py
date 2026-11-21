@@ -127,13 +127,13 @@ class Actor:
         self.count = 0
 
     # -- looking ---------------------------------------------------------------------------------------------------
-    def look(self, max_chars: int = DEFAULT_MAX_CHARS) -> str:
+    def look(self, max_chars: int = DEFAULT_MAX_CHARS, window: bool = True) -> str:
         """The page as the model sees it, followed by what changed since the previous look (new text, alerts,
         field errors). `self.changes` keeps the same information as data, for the test designer."""
         before = self.obs
         self.obs = self.session.observe()
         self.changes = diff(before, self.obs)
-        return render(self.obs, max_chars) + render_changes(self.changes)
+        return render(self.obs, max_chars, window) + render_changes(self.changes)
 
     # -- the one entry point ---------------------------------------------------------------------------------------
     def act(self, action: Action) -> ActionResult:
@@ -214,7 +214,14 @@ class Actor:
             return ActionResult(status="stopped", message=f"stopped before clicking: {v.reason}")
         before, t0 = self.session.snapshot(), now_ms()
         try:
-            target.click(timeout=self.click_timeout_ms)
+            try:
+                target.click(timeout=self.click_timeout_ms)
+            except PlaywrightError:
+                self.session.watcher.settle(cap_ms=1000, since=t0)
+                try:
+                    target.click(timeout=1000)
+                except PlaywrightError:
+                    target.evaluate("el => el.click()")
         except PlaywrightError as ex:
             return _fail(f"could not click {self._label(e)}: {self._explain(ex)}")
         return self._done(f"clicked {self._label(e)}", before, t0,
@@ -226,9 +233,10 @@ class Actor:
             return t
         e, loc, target = t
         if e.widget in NOT_TEXT_FIELDS:
-            return _fail(f"{self._label(e)} is not a text field; use click" + (" or select" if e.widget == "select" else ""))
-        if "readonly" in e.states:
-            return _fail(f"{self._label(e)} is read-only: click it to open its picker or calendar, then click an option")
+            if "date-picker" not in e.states:
+                return _fail(f"{self._label(e)} is not a text field; use click" + (" or select" if e.widget == "select" else ""))
+            if not ISO_DATE.fullmatch(a.text):
+                return _fail(f"{self._label(e)} is a date picker: type the date as YYYY-MM-DD or click an individual day")
         if "disabled" in e.states:
             return _fail(f"{self._label(e)} is disabled")
         v = self.policy.check_type(e)
@@ -237,19 +245,30 @@ class Actor:
         if e.widget == "date" and e.input_type == "date" and not ISO_DATE.fullmatch(a.text):
             return _fail(f"{self._label(e)} is a native date field: type the date as YYYY-MM-DD")
         before, t0 = self.session.snapshot(), now_ms()
+        use_keys = a.keys or e.widget in {"textbox", "searchbox", "combobox"}
         try:
-            if a.keys:
+            if "date-picker" in e.states and ISO_DATE.fullmatch(a.text):
+                target.evaluate("(el, value) => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(el, value); el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }", a.text)
+                self.session.page.wait_for_timeout(300)
+            elif use_keys:
                 target.clear(timeout=self.click_timeout_ms)
                 target.press_sequentially(a.text, delay=40, timeout=self.click_timeout_ms)
             else:
                 target.fill(a.text, timeout=self.click_timeout_ms)
             if a.submit:
                 target.press("Enter", timeout=self.click_timeout_ms)
+            result = self._done(f"typed {quote(clip(a.text, 60))} into {self._label(e)}" + (" and pressed Enter" if a.submit else ""),
+                          before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text, keys=use_keys,
+                                           element_name=e.name, widget=e.widget))
+            if result.ok and use_keys:
+                seen = {x.id for x in self.obs.elements}
+                obs = self.session.perceiver.observe(remember=False)
+                new = [x for x in obs.elements if x.id not in seen and x.widget not in ("textbox", "searchbox")][:6]
+                result.message += (" | suggestions: " + " ; ".join(self._label(x) for x in new)) if new \
+                    else " | no suggestions appeared yet: wait, then look again"
+            return result
         except PlaywrightError as ex:
             return _fail(f"could not type into {self._label(e)}: {self._explain(ex)}")
-        return self._done(f"typed {quote(clip(a.text, 60))} into {self._label(e)}" + (" and pressed Enter" if a.submit else ""),
-                          before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text, keys=a.keys,
-                                           element_name=e.name, widget=e.widget))
 
     def _select(self, a: Select) -> ActionResult:
         t = self._target(a.id)
