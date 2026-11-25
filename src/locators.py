@@ -28,6 +28,16 @@ def _css_attr(attr: str, value: str) -> str:
     return f'[{attr}="{value.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"]'
 
 
+def _prefix(text: str, limit: int = 60) -> str:
+    """The leading whole words of `text`, at most `limit` characters (one word if the first is longer)."""
+    words, out = text.split(), ""
+    for w in words:
+        if out and len(out) + 1 + len(w) > limit:
+            break
+        out = f"{out} {w}" if out else w
+    return out.rstrip(",;:")
+
+
 def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
     out: list[Locator] = []
     name = e.name
@@ -46,10 +56,15 @@ def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
     for a in _OTHER_TEST_ATTRS:
         if attrs.get(a):
             out.append(Locator(kind="css", value=_css_attr(a, attrs[a])))
-    if name and (e.role in ("button", "link") or e.widget == "clickable") and len(name) <= MAX_TEXT_NAME:
-        if clean != name:
-            out.append(Locator(kind="text", value=clean, exact=False))
-        out.append(Locator(kind="text", value=name))
+    if name and (e.role in ("button", "link") or e.widget == "clickable"):
+        if len(name) <= MAX_TEXT_NAME:
+            if clean != name:
+                out.append(Locator(kind="text", value=clean, exact=False))
+            out.append(Locator(kind="text", value=name))
+        else:
+            # A long name (an autocomplete option with city, region and airport) still needs a handle: its opening
+            # words, matched as a substring. verify_locators() rejects it if it is not unique.
+            out.append(Locator(kind="text", value=_prefix(clean or name), exact=False))
     if attrs.get("id") and not is_dynamic_id(attrs["id"]):
         out.append(Locator(kind="css", value=_css_attr("id", attrs["id"])))
     if attrs.get("name") and e.tag:

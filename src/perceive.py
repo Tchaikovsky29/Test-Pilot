@@ -512,7 +512,7 @@ class Perceiver:
         except (PlaywrightError, KeyError, TypeError, ValueError):
             return set(), {}, 0.0, (0.0, 0.0)  # perception degrades: accessibility-tree controls only, no windowing
 
-    def observe(self, settle: bool = True, remember=True) -> Observation:
+    def observe(self, settle: bool = True) -> Observation:
         settled = self.watcher.settle(cap_ms=3000) if settle else {"probe": None, "pending": 0}
         info = settled.get("probe") or self._retry(lambda: self.page.evaluate("() => ({url: location.href, title: document.title})"))
         frames = self._capture()
@@ -526,8 +526,6 @@ class Perceiver:
         elements: list[Element] = []
         hoisted: list[Line] = []
         modal = False
-        if remember:
-            self._previous = {e.id for e in elements}
         for frame in frames:
             start = len(lines)
             # Text from a cross-origin frame is not in `visible`, so it is not filtered there.

@@ -57,7 +57,7 @@ def _fit(src: list[str], budget: float) -> int:
 def _dialog_block(obs: Observation) -> tuple[list[Line], int] | None:
     """(the dialog's lines, how many page controls are hidden behind it), when a real modal with at least one control
     is open. A modal with no control to press is left alone: hiding the page then could leave the model stuck."""
-    if not obs.modal:
+    if not obs.blocked:
         return None
     inside: list[Line] = []
     hidden, in_dialog = 0, False
@@ -65,7 +65,7 @@ def _dialog_block(obs: Observation) -> tuple[list[Line], int] | None:
         if ln.kind == "overlay":
             in_dialog = not ln.text.startswith("end")
             inside.append(ln)
-        elif in_dialog or ln.kind == "alert":
+        elif in_dialog:
             inside.append(ln)
         elif ln.kind == "control":
             hidden += 1
@@ -175,7 +175,7 @@ def render(obs: Observation, max_chars: int = DEFAULT_MAX_CHARS, window: bool = 
     """`window=False` lists the whole page (the explorer asks for that when it keeps failing, in case the control it
     needs was left out of the view)."""
     lines, tail = obs.lines, []
-    dialog = _dialog_block(obs) if window else None
+    dialog = _dialog_block(obs)
     if dialog is not None:
         lines, hidden = dialog
         tail = [f"(page behind the dialog is hidden: {hidden} control{'s' if hidden != 1 else ''}; it returns when the dialog closes)"]

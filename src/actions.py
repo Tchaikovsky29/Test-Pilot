@@ -122,6 +122,7 @@ class Actor:
     def __init__(self, session: BrowserSession, policy: Policy, click_timeout_ms: int = CLICK_TIMEOUT_MS):
         self.session, self.policy, self.click_timeout_ms = session, policy, click_timeout_ms
         self.obs: Observation | None = None
+        self._id_aliases: dict[int, int] = {}
         self.changes: Changes = Changes()
         self.steps: list[Step] = []
         self.count = 0
@@ -132,6 +133,12 @@ class Actor:
         field errors). `self.changes` keeps the same information as data, for the test designer."""
         before = self.obs
         self.obs = self.session.observe()
+        if before is not None:
+            old_by_key = {(e.widget, e.name, e.role): e for e in before.elements}
+            for e in self.obs.elements:
+                old = old_by_key.get((e.widget, e.name, e.role))
+                if old is not None:
+                    self._id_aliases[old.id] = e.id
         self.changes = diff(before, self.obs)
         return render(self.obs, max_chars, window) + render_changes(self.changes)
 
@@ -169,15 +176,54 @@ class Actor:
     def _target(self, element_id: int):
         if self.obs is None:
             return _fail("look at the page first")
-        e = self.obs.element(element_id)
-        if e is None:
+        if self.obs.blocked:
+            fresh = self.session.observe()
+            if fresh.blocked:
+                target = fresh.element(element_id)
+                if target is not None and target.id not in fresh.dialog_controls():
+                    return _fail(f"{target.display_name or target.widget} is behind a dialog: close or accept the dialog first")
+            self.obs = fresh
+
+        stale = self.obs.element(element_id)
+        if stale is None:
+            stale = next((e for e in self.obs.elements if self._id_aliases.get(element_id) == e.id), None)
+        if stale is None:
             return _fail(f"[{element_id}] is not on the page as of the last look; look again")
-        loc = ensure_locator(self.session.page, e, self.obs.elements)
-        if loc is None:
-            if all((c.matches or 0) == 0 for c in e.locators):
-                return _fail(f'[{e.id}] {e.widget} "{e.display_name}" is no longer on the page; look again')
-            return _fail(f'[{e.id}] {e.widget} "{e.display_name}" cannot be told apart from similar elements')
-        return e, loc, resolve(root_for(self.session.page, e.frame_url), loc)
+
+        last = None
+        for _ in range(4):
+            resolved_id = self._id_aliases.get(element_id, element_id)
+            e = self.obs.element(resolved_id)
+            if e is None and stale is not None:
+                matches = [x for x in self.obs.elements
+                           if x.widget == stale.widget and x.name == stale.name and x.role == stale.role]
+                if len(matches) == 1:
+                    e = matches[0]
+                    self._id_aliases[element_id] = e.id
+            if e is not None:
+                last = e
+                loc = ensure_locator(self.session.page, e, self.obs.elements)
+                if loc is not None:
+                    return e, loc, resolve(root_for(self.session.page, e.frame_url), loc)
+                if not e.locators:
+                    break  # nothing to find it by: looking again will not help
+
+            before = self.obs
+            self.session.watcher.settle(cap_ms=750)
+            self.obs = self.session.observe()
+
+            old_by_key = {(x.widget, x.name, x.role): x for x in before.elements}
+            for x in self.obs.elements:
+                old = old_by_key.get((x.widget, x.name, x.role))
+                if old is not None:
+                    self._id_aliases[old.id] = x.id
+
+        if last is not None and not last.locators:
+            return _fail(f'[{element_id}] {last.widget} "{last.display_name}" is on the page but cannot be targeted '
+                         f'(no name, label, test id or stable id to find it by); try another control or the keyboard')
+        if last is not None and any((c.matches or 0) > 1 for c in last.locators):
+            return _fail(f'[{element_id}] {last.widget} "{last.display_name}" cannot be told apart from similar elements')
+        return _fail(f'[{element_id}] {stale.widget} "{stale.display_name}" is no longer on the page; look again')
 
     def _label(self, e: Element) -> str:
         return f'[{e.id}] {e.widget} "{clip(e.display_name, 60)}"'
@@ -257,18 +303,13 @@ class Actor:
                 target.fill(a.text, timeout=self.click_timeout_ms)
             if a.submit:
                 target.press("Enter", timeout=self.click_timeout_ms)
-            result = self._done(f"typed {quote(clip(a.text, 60))} into {self._label(e)}" + (" and pressed Enter" if a.submit else ""),
-                          before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text, keys=use_keys,
-                                           element_name=e.name, widget=e.widget))
-            if result.ok and use_keys:
-                seen = {x.id for x in self.obs.elements}
-                obs = self.session.perceiver.observe(remember=False)
-                new = [x for x in obs.elements if x.id not in seen and x.widget not in ("textbox", "searchbox")][:6]
-                result.message += (" | suggestions: " + " ; ".join(self._label(x) for x in new)) if new \
-                    else " | no suggestions appeared yet: wait, then look again"
-            return result
+            if use_keys:
+                self.session.page.wait_for_timeout(3000)
         except PlaywrightError as ex:
             return _fail(f"could not type into {self._label(e)}: {self._explain(ex)}")
+        return self._done(f"typed {quote(clip(a.text, 60))} into {self._label(e)}" + (" and pressed Enter" if a.submit else ""),
+                          before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text, keys=use_keys,
+                                           element_name=e.name, widget=e.widget))
 
     def _select(self, a: Select) -> ActionResult:
         t = self._target(a.id)

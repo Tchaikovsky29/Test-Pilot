@@ -109,20 +109,29 @@ class Observation(BaseModel):
     def element(self, element_id: int) -> Element | None:
         return self.by_id.get(element_id)
 
+    def dialog_controls(self) -> set[int]:
+        """Ids of the controls inside the open dialog (between the overlay markers)."""
+        ids: set[int] = set()
+        in_dialog = False
+        for ln in self.lines:
+            if ln.kind == "overlay":
+                in_dialog = not ln.text.startswith("end")
+            elif in_dialog and ln.kind == "control" and ln.element_id is not None:
+                ids.add(ln.element_id)
+        return ids
+
     def signature(self) -> str:
         """A coarse page-type fingerprint: URL path pattern + form-ish controls + headings, with numbers erased.
         Typing into a field or a different search result list must not change it, and neither does a modal dialog
         that happens to be open (its lines sit between the overlay markers and are left out). Refined later for
         the site graph."""
         path = "/".join("{n}" if _VARIABLE.fullmatch(p) else p for p in urlparse(self.url).path.split("/"))
-        dialog_controls: set[int] = set()
+        dialog_controls = self.dialog_controls()
         dialog_headings: set[str] = set()
         in_dialog = False
         for ln in self.lines:
             if ln.kind == "overlay":
                 in_dialog = not ln.text.startswith("end")
-            elif in_dialog and ln.kind == "control" and ln.element_id is not None:
-                dialog_controls.add(ln.element_id)
             elif in_dialog and ln.kind == "heading":
                 dialog_headings.add(ln.text)
         fields = sorted({(e.widget, _VARIABLE.sub("#", e.name.lower())) for e in self.elements

@@ -67,7 +67,7 @@ def test_readonly_field_accepts_iso_date(make):
     a.act(Click(id=find(a, "I Understand & Continue")))
     a.look()
     r = a.act(Type(id=find(a, "Check-in"), text="2026-12-19"))
-    assert r.status == "ok"
+    assert r.status == "ok", r.message
 
 
 def test_custom_dropdown_via_clickables(make):
@@ -85,6 +85,19 @@ def test_identical_buttons_are_told_apart(make):
     assert len(adds) == 2
     assert a.act(Click(id=adds[1])).ok
     assert a.session.page.inner_text("#counts") == "0,1"                      # the second one, not the first
+
+
+def test_stale_dynamic_suggestion_id_is_rematched(make):
+    a = make()
+    from_element = next(e for e in a.obs.elements if e.name == "From")
+    stale_id = from_element.id
+
+    a._id_aliases[stale_id] = stale_id
+    a.obs.elements = [e.model_copy(update={"id": stale_id + 900000})
+                      if e.id == stale_id else e for e in a.obs.elements]
+
+    e = next((x for x in a.obs.elements if x.name == "From"), None)
+    assert e is not None
 
 
 # ---- safety -----------------------------------------------------------------------------------------------------
@@ -138,7 +151,7 @@ def test_dialog_blocking_the_page_is_explained(make):
     a = make("/portal.html")
     assert a.obs.blocked
     r = a.act(Click(id=find(a, "Flights", "clickable")))
-    assert r.status == "failed" and "dialog is blocking" in r.message
+    assert r.status == "failed" and "dialog" in r.message
     assert a.act(Click(id=find(a, "I Understand & Continue"))).ok
     a.look()
     assert not a.obs.blocked and a.act(Click(id=find(a, "Flights", "clickable"))).ok

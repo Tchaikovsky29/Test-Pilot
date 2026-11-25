@@ -8,7 +8,7 @@ Test-Pilot is an early-stage working implementation, not just a proof of concept
 
 - perceive and summarize a live page;
 - act safely through Playwright;
-- call Gemini, Groq or OpenAI-compatible models for structured decisions;
+- call Gemini, Groq, OpenAI or OpenRouter models for structured decisions;
 - turn a requirement into a short exploration plan;
 - run a bounded browser exploration and collect replayable steps and evidence;
 - write a timestamped JSON exploration report;
@@ -54,7 +54,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 python -m playwright install chromium
 cp .env.example .env
-# Add a key for Gemini, Groq or OpenAI, then:
+# Add a key for Gemini, Groq, OpenAI or OpenRouter, then:
 test-pilot llm
 test-pilot observe https://phptravels.net/ --locators
 test-pilot explore https://phptravels.net/ "Search for a flight from Pune to Delhi"
@@ -67,9 +67,9 @@ Copy `.env.example` to `.env`. Keep secrets out of source control.
 | Variable | Purpose |
 |---|---|
 | `TEST_PILOT_CDP_URL` | CDP endpoint of an existing Chromium. Leave empty to launch Chromium locally. |
-| `LLM_PROVIDER` | `gemini` (default), `groq`, or `openai`. |
+| `LLM_PROVIDER` | `gemini` (default), `groq`, `openai`, or `openrouter`. |
 | `LLM_MODEL` | Optional provider model override. |
-| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY` | API key for the selected provider. |
+| `GEMINI_API_KEY`, `GROQ_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` | API key for the selected provider. |
 | `LLM_MAX_TOKENS` | Maximum response tokens; default `4096`. |
 | `LLM_REASONING_EFFORT` | Optional `none`, `minimal`, `low`, `medium`, or `high`. |
 | `LLM_TEMPERATURE` | Sampling temperature; ignored by OpenAI reasoning models. |
@@ -80,7 +80,7 @@ Copy `.env.example` to `.env`. Keep secrets out of source control.
 
 ```bash
 test-pilot observe <url> [--headed] [--cdp-url URL] [--max-chars N] [--full] [--json] [--locators]
-test-pilot llm [--provider gemini|groq|openai] [--model MODEL] [--models]
+test-pilot llm [--provider gemini|groq|openai|openrouter] [--model MODEL] [--models]
 test-pilot explore <url> "<requirement>" [--provider PROVIDER] [--model MODEL] [--max-steps N] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL] [--quiet]
 ```
 
@@ -205,7 +205,7 @@ The suite currently contains 198 tests. The latest local run has 195 passing and
 3. **Locator improvements:** icon-font name cleaning, icon-free locator variants, visible filtering and marked `.nth()` fallbacks.
 4. **Actions and safety:** `Actor` with click/type/select/press/scroll/wait/go-back; allowed-host and sensitive-action policy; replayable `Step.code()`.
 5. **Evidence extraction:** observation diffs for navigation, appeared/disappeared text, alerts and native validation messages.
-6. **LLM support:** one OpenAI-compatible client for Gemini, Groq and OpenAI, with structured JSON repair, retries, call budgets and usage accounting.
+6. **LLM support:** one OpenAI-compatible client for Gemini, Groq, OpenAI and OpenRouter, with structured JSON repair, retries, call budgets and usage accounting.
 7. **Requirement analysis and exploration:** bounded end-to-end browser loops, valid-first behavior, validation probing, stuck/failure/time/action budgets, deterministic reports and JSON artifacts.
 
 ## Roadmap

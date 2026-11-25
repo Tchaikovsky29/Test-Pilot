@@ -67,7 +67,7 @@ def fake():
 
 
 def make(fake, provider="gemini", **over):
-    env = {"GEMINI_API_KEY": "gk", "GROQ_API_KEY": "qk", "OPENAI_API_KEY": "ok", "LLM_BASE_URL": fake.url,
+    env = {"GEMINI_API_KEY": "gk", "GROQ_API_KEY": "qk", "OPENAI_API_KEY": "ok", "OPENROUTER_API_KEY": "rk", "LLM_BASE_URL": fake.url,
            "LLM_PROVIDER": provider, "LLM_MAX_TOKENS": "321", **over}
     cfg = LLMConfig.from_env(env=env)
     cfg.max_retries = 1
@@ -91,9 +91,10 @@ def test_gemini_is_the_default():
 
 
 def test_switching_is_a_name():
-    env = {"GEMINI_API_KEY": "g", "GROQ_API_KEY": "q", "OPENAI_API_KEY": "o"}
+    env = {"GEMINI_API_KEY": "g", "GROQ_API_KEY": "q", "OPENAI_API_KEY": "o", "OPENROUTER_API_KEY": "r"}
     assert LLMConfig.from_env(env={**env, "LLM_PROVIDER": "groq"}).model == "openai/gpt-oss-120b"
     assert LLMConfig.from_env(env={**env, "LLM_PROVIDER": "openai"}).model == "gpt-6-luna"
+    assert LLMConfig.from_env(env={**env, "LLM_PROVIDER": "openrouter"}).model == "nvidia/nemotron-3.5-super-vl:free"
     assert LLMConfig.from_env("openai", env={**env, "LLM_PROVIDER": "groq"}).provider.name == "openai"   # name wins
     assert LLMConfig.from_env("groq", model="m", env={**env, "LLM_MODEL": "other"}).model == "m"        # arg > env
     assert LLMConfig.from_env(env={**env, "LLM_MODEL": "other"}).model == "other"
@@ -101,7 +102,7 @@ def test_switching_is_a_name():
 
 
 def test_unknown_provider_and_missing_key_are_explained():
-    with pytest.raises(LLMConfigError, match="gemini, groq, openai"):
+    with pytest.raises(LLMConfigError, match="gemini, groq, openai, openrouter"):
         LLMConfig.from_env("claude", env={})
     with pytest.raises(LLMConfigError, match="GROQ_API_KEY"):
         LLMConfig.from_env("groq", env={"GEMINI_API_KEY": "k"})
@@ -390,3 +391,24 @@ def test_which_errors_are_worth_another_try(fake):
     with pytest.raises(LLMError) as rate:
         make(fake).chat(MSG)
     assert rate.value.transient is False                             # already waited; retrying at once would not help
+
+
+def test_openrouter_uses_default_model_and_completion_tokens(fake):
+    fake.script = [{"content": "hi"}]
+    make(fake, "openrouter").chat(MSG)
+    b = sent(fake)
+    assert fake.requests[-1]["auth"] == "Bearer rk"
+    assert b["model"] == "nvidia/nemotron-3.5-super-vl:free" and b["max_completion_tokens"] == 321
+    assert b["temperature"] == 0.2 and "max_tokens" not in b
+
+
+def test_openrouter_request_marks_system_prefix_for_caching(fake):
+    fake.script = [{"content": "hi"}]
+    make(fake, "openrouter").chat([
+        {"role": "system", "content": "stable instructions"},
+        {"role": "user", "content": "dynamic page view"},
+    ])
+    messages = sent(fake)["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert messages[1]["content"] == "dynamic page view"

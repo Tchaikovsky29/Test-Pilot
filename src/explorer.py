@@ -70,7 +70,6 @@ class Event(BaseModel):
     url: str
     page: str  # page-type signature
     note: str = ""
-    view: str = "" 
     action: dict
     status: str
     message: str
@@ -134,7 +133,7 @@ PAGE VIEW
 
 METHOD
 1. Carry out the requirement end to end with realistic, valid data (made-up names, tester@example.com, future dates). Native date fields take YYYY-MM-DD; for calendar widgets click the field, look, then click the day.
-2. Complete the valid path first. Before pressing Search/Submit/Continue, check that every field the plan needs shows a value in the view: for autocomplete fields that means a chosen suggestion, and for dates the date. Only after one successful submit, probe validation once per form.
+2. Once per form, also submit with a required field empty or a constraint-breaking value (bad email, past date, number out of range) and read the message. Do not repeat a probe.
 3. Prefer small steps. If an action fails, read the reason and try something different; never repeat a failing action.
 4. For fields marked `date-picker`, use `type` with an ISO date such as `2026-12-03`, or click an individual day control shown after opening the picker. Never click a giant month-grid label.
 5. For fields marked `autocomplete`, never assume typing text is enough: wait for matching choices, click the exact matching choice or press the matching keyboard selection, and verify the field was updated before continuing.
@@ -305,20 +304,20 @@ def explore(session: BrowserSession, llm, url: str, requirement: str, *, policy:
         if stuck.fails >= MAX_FAILS_IN_A_ROW:
             return finish("stuck", f"{stuck.fails} actions in a row failed")
 
-        decision = None
-        for attempt in range(2):
-            try:
-                decision = llm.structured(build_messages(requirement, plan, report.events, page_text, today, warning), Decision)
-                break
-            except LLMError as e:
-                if not e.transient or attempt == 1:
-                    return finish("llm_error", str(e))
+        try:
+            decision = llm.structured(build_messages(requirement, plan, report.events, page_text, today, warning), Decision)
+            llm_fails = 0
+        except LLMError as e:
+            llm_fails += 1
+            if e.transient and llm_fails < 2:  # a flaky generation or a dropped connection: look again and ask again
+                continue
+            return finish("llm_error", str(e))
         if decision.done:
             report.model_summary = decision.summary
             return finish("done")
 
         result: ActionResult = actor.act(decision.action)
-        pending = ev = Event(n=n, url=actor.obs.url, page=actor.obs.signature(), view=page_text ,note=decision.note,
+        pending = ev = Event(n=n, url=actor.obs.url, page=actor.obs.signature(), note=decision.note,
                              action=decision.action.model_dump(), status=result.status, message=result.message,
                              code=result.step.code() if result.step else "")
         report.events.append(ev)

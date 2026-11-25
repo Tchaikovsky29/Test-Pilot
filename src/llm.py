@@ -1,4 +1,4 @@
-"""One LLM client for three OpenAI-compatible providers, chosen by name: gemini (default), groq, openai.
+"""One LLM client for four OpenAI-compatible providers, chosen by name: gemini (default), groq, openai, openrouter.
 
 Switching is a name, not a code change:   LLM_PROVIDER=groq   or   test-pilot llm --provider groq
 Each provider is a small record (endpoint, key variable, default model, and the two request details where the
@@ -64,6 +64,8 @@ PROVIDERS: dict[str, Provider] = {
                      token_param="max_completion_tokens"),
     "openai": Provider("openai", "https://api.openai.com/v1", "OPENAI_API_KEY", "gpt-6-luna",
                        token_param="max_completion_tokens", temperature=False),
+    "openrouter": Provider("openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 
+                           "nvidia/nemotron-3.5-super-vl:free", token_param="max_completion_tokens")
 }
 DEFAULT_PROVIDER = "gemini"
 
@@ -164,6 +166,15 @@ class LLM:
         if c.max_calls is not None and self.usage.calls >= c.max_calls:
             raise LLMError(f"LLM call budget used up ({c.max_calls}); stop and report what was found")
         msgs = list(messages)
+        if p.name == "openrouter" and msgs:
+            cached = []
+            for i, message in enumerate(msgs):
+                copied = dict(message)
+                content = copied.get("content")
+                if i == 0 and isinstance(content, str):
+                    copied["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                cached.append(copied)
+            msgs = cached
         if json_mode and not any("json" in str(m.get("content", "")).lower() for m in msgs):
             msgs.insert(0, {"role": "system", "content": "Reply with a single JSON object and nothing else."})
         kwargs: dict[str, Any] = {"model": c.model, "messages": msgs, p.token_param: max_tokens or c.max_tokens}
