@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -127,9 +128,40 @@ class Usage:
     calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_tokens: int = 0  # prompt tokens the provider served from its cache (a subset of prompt_tokens)
 
     def summary(self) -> str:
-        return f"{self.calls} call(s), {self.prompt_tokens} prompt + {self.completion_tokens} completion tokens"
+        return (f"{self.calls} call(s), {self.prompt_tokens} prompt ({self.cached_tokens} cached) + "
+                f"{self.completion_tokens} completion tokens")
+
+
+MAX_CACHE_BREAKPOINTS = 4  # Anthropic's limit; Gemini (via OpenRouter) only uses the last one
+
+
+def _cache_markers(messages: list[dict], explicit: bool) -> list[dict]:
+    """Callers flag the end of each stable stretch of the prompt with `cache: True` (the system message always counts
+    as one). Providers that cache only when asked (Anthropic and Gemini models on OpenRouter) get a cache_control
+    marker there; the rest cache stable prefixes on their own, so the flag is simply dropped. Only the last
+    MAX_CACHE_BREAKPOINTS flags are kept: the later the breakpoint, the longer the prefix it covers. A content given
+    as a list of strings becomes one text block per string (marker on the last) or, without explicit caching, one
+    joined string."""
+    marks = [i for i, m in enumerate(messages)
+             if m.get("cache") or (i == 0 and m.get("role") == "system")][-MAX_CACHE_BREAKPOINTS:]
+    out = []
+    for i, m in enumerate(messages):
+        m = {k: v for k, v in m.items() if k != "cache"}
+        content = m.get("content")
+        parts = content if isinstance(content, list) and all(isinstance(x, str) for x in content) else None
+        if explicit and (i in marks or parts is not None):
+            blocks = [{"type": "text", "text": t} for t in (parts if parts is not None else [content])
+                      if isinstance(t, str) and t]
+            if i in marks and blocks:
+                blocks[-1]["cache_control"] = {"type": "ephemeral"}
+            m["content"] = blocks or content
+        elif parts is not None:
+            m["content"] = "".join(parts)
+        out.append(m)
+    return out
 
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -157,6 +189,8 @@ class LLM:
     def __init__(self, config: LLMConfig, client: openai.OpenAI | None = None):
         self.config = config
         self.usage = Usage()
+        # OpenRouter routes requests with the same session id to the same provider, whose cache then keeps hitting.
+        self.session_id = uuid.uuid4().hex
         self._client = client or openai.OpenAI(
             api_key=config.api_key, base_url=config.base_url, timeout=config.timeout, max_retries=config.max_retries)
 
@@ -165,16 +199,7 @@ class LLM:
         c, p = self.config, self.config.provider
         if c.max_calls is not None and self.usage.calls >= c.max_calls:
             raise LLMError(f"LLM call budget used up ({c.max_calls}); stop and report what was found")
-        msgs = list(messages)
-        if p.name == "openrouter" and msgs:
-            cached = []
-            for i, message in enumerate(msgs):
-                copied = dict(message)
-                content = copied.get("content")
-                if i == 0 and isinstance(content, str):
-                    copied["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-                cached.append(copied)
-            msgs = cached
+        msgs = _cache_markers(messages, explicit=p.name == "openrouter")
         if json_mode and not any("json" in str(m.get("content", "")).lower() for m in msgs):
             msgs.insert(0, {"role": "system", "content": "Reply with a single JSON object and nothing else."})
         kwargs: dict[str, Any] = {"model": c.model, "messages": msgs, p.token_param: max_tokens or c.max_tokens}
@@ -184,6 +209,8 @@ class LLM:
             kwargs["reasoning_effort"] = c.reasoning_effort
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        if p.name == "openrouter":
+            kwargs["extra_body"] = {"session_id": self.session_id}
         self.usage.calls += 1  # counted when attempted: a failing call still spends quota
         try:
             resp = self._client.chat.completions.create(**kwargs)
@@ -192,6 +219,8 @@ class LLM:
         if resp.usage:
             self.usage.prompt_tokens += resp.usage.prompt_tokens or 0
             self.usage.completion_tokens += resp.usage.completion_tokens or 0
+            details = getattr(resp.usage, "prompt_tokens_details", None)
+            self.usage.cached_tokens += (getattr(details, "cached_tokens", None) or 0) if details else 0
         choice = resp.choices[0]
         text = _THINK.sub("", choice.message.content or "").strip()
         if not text and choice.finish_reason == "length":
@@ -201,7 +230,8 @@ class LLM:
             raise LLMTransientError(f"{p.name} returned an empty reply (finish_reason={choice.finish_reason})")
         return text
 
-    def structured(self, messages: list[dict], schema: type[T] | TypeAdapter, *, max_repairs: int = 1) -> T:
+    def structured(self, messages: list[dict], schema: type[T] | TypeAdapter, *, max_repairs: int = 1,
+                   max_tokens: int | None = None) -> T:
         """Ask for JSON and validate it against a pydantic model.
 
         Two kinds of slip are handled here so callers do not have to:
@@ -214,7 +244,7 @@ class LLM:
         repairs, json_mode = 0, True
         while True:
             try:
-                text = self.chat(msgs, json_mode=json_mode)
+                text = self.chat(msgs, json_mode=json_mode, max_tokens=max_tokens)
             except LLMJsonModeError as e:
                 if e.failed_generation:
                     try:

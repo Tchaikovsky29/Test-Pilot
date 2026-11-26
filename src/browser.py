@@ -36,6 +36,7 @@ class BrowserConfig:
     nav_timeout_ms: int = 30_000
     dialog_policy: str = "accept"
     maximize: bool = True
+    fresh_context: bool = False  # on a remote browser, open a context of our own instead of reusing the default one
 
 
 class BrowserSession:
@@ -56,7 +57,10 @@ class BrowserSession:
         if c.cdp_url:
             self._browser = self._pw.chromium.connect_over_cdp(c.cdp_url)
             # Hosted browsers usually expose a single default context: use it rather than creating another.
-            self._context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
+            if c.fresh_context or not self._browser.contexts:  # parallel workers must not share cookies or tabs
+                self._context = self._browser.new_context()
+            else:
+                self._context = self._browser.contexts[0]
             self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
             args = ["--start-maximized"] if c.maximize and not c.headless else []

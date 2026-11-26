@@ -82,11 +82,19 @@ Copy `.env.example` to `.env`. Keep secrets out of source control.
 test-pilot observe <url> [--headed] [--cdp-url URL] [--max-chars N] [--full] [--json] [--locators]
 test-pilot llm [--provider gemini|groq|openai|openrouter] [--model MODEL] [--models]
 test-pilot explore <url> "<requirement>" [--provider PROVIDER] [--model MODEL] [--max-steps N] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL] [--quiet]
+test-pilot design <report.json> [--provider PROVIDER] [--model MODEL] [--out PATH]
+test-pilot verify <cases.json> [--case TC-NN] [-c N] [--provider PROVIDER] [--model MODEL] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL]
 ```
 
 - `observe` prints the text the model would receive. `--locators` verifies one Playwright locator per control.
 - `llm` validates the provider configuration with a tiny structured call. `--models` lists models accessible to the configured key.
 - `explore` runs the bounded LLM/browser loop and writes an `ExplorationReport` JSON file under `artifacts/` by default.
+- `design` turns an exploration report into 5–10 structured test cases (`<report>.cases.json`) with one model call, then checks each case against the recorded evidence in code. A step must repeat a successful recorded step or name a control that was seen. An expected outcome counts as observed only if its text appears in what the browser recorded. Each case is marked `observed`, `partial` or `unverified` with the reasons, and requirement points no case covers are listed as gaps.
+- `verify` runs each test case in its own fresh browser context, one at a time by default. `-c N` runs N cases at once (watch free-tier rate limits), and `--case TC-NN` runs just that case. It writes `<report>.verified.json`:
+  - **Recorded steps** are replayed without the model.
+  - **Other steps** are carried out by the model through the same safety policy as the explorer, in at most 6 actions per step.
+  - **Expected outcomes** are checked on the live page, including the values fields hold. A validation message the designer only guessed is replaced by the page's real message, whether that shows on the field, in an alert or as a toast.
+  - **Each case** ends `verified`, `unconfirmed`, `failed` or `blocked`, with the steps that worked and the checks that held. Those are the input for the test compiler. The model never writes code.
 
 ## Using it from Python
 

@@ -18,6 +18,7 @@ from .models import Element, Locator, Observation
 from .policy import Policy
 from .render import DEFAULT_MAX_CHARS, render
 from .text import clip, quote
+from .datepick import pick_date
 from .watch import describe_change, now_ms
 
 CLICK_TIMEOUT_MS = 4000
@@ -83,6 +84,8 @@ class Step(BaseModel):
     frame_url: str = ""
     value: str | None = None
     keys: bool = False
+    submit: bool = False  # Enter was pressed after typing
+    date_picker: bool = False  # the value is an ISO date set through the field's calendar (see datepick.pick_date)
     element_name: str = ""
     widget: str = ""
     url: str = ""  # page the step ran on
@@ -93,8 +96,12 @@ class Step(BaseModel):
         v = json.dumps(self.value, ensure_ascii=False)
         if self.kind == "click":
             return f"{target}.click()"
+        if self.kind == "type" and self.date_picker:
+            line = f"pick_date({target}, {v})"  # the generated test imports the same helper the explorer used
+            return line + (f'; {target}.press("Enter")' if self.submit else "")
         if self.kind == "type":
-            return f"{target}.press_sequentially({v})" if self.keys else f"{target}.fill({v})"
+            line = f"{target}.press_sequentially({v})" if self.keys else f"{target}.fill({v})"
+            return line + (f'; {target}.press("Enter")' if self.submit else "")
         if self.kind == "select":
             return f"{target}.select_option(label={v})"
         if self.kind == "press":
@@ -291,12 +298,21 @@ class Actor:
         if e.widget == "date" and e.input_type == "date" and not ISO_DATE.fullmatch(a.text):
             return _fail(f"{self._label(e)} is a native date field: type the date as YYYY-MM-DD")
         before, t0 = self.session.snapshot(), now_ms()
+        if "date-picker" in e.states and e.input_type != "date":  # native date inputs take ISO via fill, below
+            picked = pick_date(target, a.text, timeout_ms=self.click_timeout_ms)
+            if not picked.ok:
+                return _fail(f"could not set {self._label(e)} to {a.text}: {picked.message}")
+            try:
+                if a.submit:
+                    target.press("Enter", timeout=self.click_timeout_ms)
+            except PlaywrightError as ex:
+                return _fail(f"set the date but could not press Enter: {self._explain(ex)}")
+            return self._done(f"set {self._label(e)} to {a.text} ({picked.message})" + (" and pressed Enter" if a.submit else ""),
+                              before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text,
+                                               date_picker=True, submit=a.submit, element_name=e.name, widget=e.widget))
         use_keys = a.keys or e.widget in {"textbox", "searchbox", "combobox"}
         try:
-            if "date-picker" in e.states and ISO_DATE.fullmatch(a.text):
-                target.evaluate("(el, value) => { const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(el, value); el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }", a.text)
-                self.session.page.wait_for_timeout(300)
-            elif use_keys:
+            if use_keys:
                 target.clear(timeout=self.click_timeout_ms)
                 target.press_sequentially(a.text, delay=40, timeout=self.click_timeout_ms)
             else:
@@ -309,7 +325,7 @@ class Actor:
             return _fail(f"could not type into {self._label(e)}: {self._explain(ex)}")
         return self._done(f"typed {quote(clip(a.text, 60))} into {self._label(e)}" + (" and pressed Enter" if a.submit else ""),
                           before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text, keys=use_keys,
-                                           element_name=e.name, widget=e.widget))
+                                           submit=a.submit, element_name=e.name, widget=e.widget))
 
     def _select(self, a: Select) -> ActionResult:
         t = self._target(a.id)

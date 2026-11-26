@@ -53,7 +53,8 @@ def fake():
                 "id": "c1", "object": "chat.completion", "created": 0, "model": body["model"],
                 "choices": [{"index": 0, "finish_reason": step.get("finish", "stop"),
                              "message": {"role": "assistant", "content": step.get("content")}}],
-                "usage": {"prompt_tokens": step.get("pt", 10), "completion_tokens": step.get("ct", 5), "total_tokens": 15},
+                "usage": {"prompt_tokens": step.get("pt", 10), "completion_tokens": step.get("ct", 5), "total_tokens": 15,
+                          "prompt_tokens_details": {"cached_tokens": step.get("cached", 0)}},
             })
 
         def log_message(self, *a):
@@ -412,3 +413,43 @@ def test_openrouter_request_marks_system_prefix_for_caching(fake):
     assert messages[0]["role"] == "system"
     assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert messages[1]["content"] == "dynamic page view"
+
+
+def test_openrouter_marks_every_flagged_breakpoint_and_other_providers_drop_the_flag(fake):
+    msgs = [{"role": "system", "content": "rules"}, {"role": "user", "content": "task", "cache": True},
+            {"role": "user", "content": "history", "cache": True}, {"role": "user", "content": "page"}]
+    fake.script = [{"content": "hi"}, {"content": "hi"}]
+    make(fake, "openrouter").chat(msgs)
+    sent_msgs = sent(fake)["messages"]
+    assert [isinstance(m["content"], list) for m in sent_msgs] == [True, True, True, False]
+    assert all("cache" not in m for m in sent_msgs)
+    make(fake).chat(msgs)
+    assert sent(fake)["messages"] == [{k: v for k, v in m.items() if k != "cache"} for m in msgs]
+
+
+def test_message_parts_become_blocks_with_the_marker_on_the_last_or_are_joined(fake):
+    msgs = [{"role": "user", "content": ["Progress:\n", "1. a\n", "2. b\n"], "cache": True}]
+    fake.script = [{"content": "hi"}, {"content": "hi"}]
+    make(fake, "openrouter").chat(msgs)
+    blocks = sent(fake)["messages"][0]["content"]
+    assert [b["text"] for b in blocks] == ["Progress:\n", "1. a\n", "2. b\n"]
+    assert ["cache_control" in b for b in blocks] == [False, False, True]
+    make(fake).chat(msgs)
+    assert sent(fake)["messages"][0]["content"] == "Progress:\n1. a\n2. b\n"
+
+
+def test_cached_prompt_tokens_are_counted(fake):
+    fake.script = [{"content": "hi", "pt": 100, "cached": 80}]
+    llm = make(fake, "openrouter")
+    llm.chat(MSG)
+    assert llm.usage.cached_tokens == 80 and "(80 cached)" in llm.usage.summary()
+
+def test_openrouter_requests_of_one_run_share_a_session_id(fake):
+    fake.script = [{"content": "hi"}, {"content": "hi"}, {"content": "hi"}]
+    llm = make(fake, "openrouter")
+    llm.chat(MSG)
+    first = sent(fake)["session_id"]
+    llm.chat(MSG)
+    assert sent(fake)["session_id"] == first
+    make(fake).chat(MSG)
+    assert "session_id" not in sent(fake)

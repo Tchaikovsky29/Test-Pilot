@@ -9,6 +9,12 @@ from test_pilot.llm import LLMError, LLMTransientError
 from test_pilot.policy import Policy
 
 
+def _flat(messages):
+    """[system, one user message]: the prompt is split into several user messages for caching; tests read it whole."""
+    text = lambda c: "".join(c) if isinstance(c, list) else c
+    return [messages[0], {"role": "user", "content": "\n\n".join(text(m["content"]) for m in messages[1:])}]
+
+
 class Script:
     """A fake LLM. Each entry is a Decision/dict, an Exception, or a function(page_text) -> Decision/dict."""
 
@@ -23,7 +29,7 @@ class Script:
                 raise self.plan
             return self.plan or Plan(requirement_points=["do the thing"], assumptions=["one adult"], areas_to_probe=["empty input"])
         self.calls += 1
-        self.prompts.append(messages)
+        self.prompts.append(_flat(messages))
         entry = self.entries.pop(0)
         if isinstance(entry, Exception):
             raise entry
@@ -128,12 +134,31 @@ def test_only_the_latest_page_is_sent(run):
     assert all(p[1]["content"].count("<page>") == 1 for p in llm.prompts)      # never the earlier pages
 
 
-def test_history_is_capped_and_says_so():
+def _events(n):
     from test_pilot.explorer import Event
-    events = [Event(n=i, url="u", page="p", action={"kind": "wait"}, status="ok", message=f"waited {i}") for i in range(1, 13)]
-    text = build_messages("r", Plan(requirement_points=["p"]), events, "PAGE", "2026-11-18")[1]["content"]
+    return [Event(n=i, url="u", page="p", action={"kind": "wait"}, status="ok", message=f"waited {i}") for i in range(1, n + 1)]
+
+
+def test_history_is_capped_and_says_so():
+    text = _flat(build_messages("r", Plan(requirement_points=["p"]), _events(12), "PAGE", "2026-11-18"))[1]["content"]
     assert "earlier steps omitted: 4" in text and "5. waited 5" in text and "4. waited 4" not in text and "12. waited 12" in text
-    assert "first view" in build_messages("r", Plan(requirement_points=["p"]), [], "PAGE", "2026-11-18")[1]["content"]
+    assert "first view" in _flat(build_messages("r", Plan(requirement_points=["p"]), [], "PAGE", "2026-11-18"))[1]["content"]
+
+
+def test_prompt_is_ordered_for_caching_and_its_prefix_holds_across_turns():
+    plan = Plan(requirement_points=["p"])
+    turns = [build_messages("r", plan, _events(n), f"PAGE {n}", "2026-11-18") for n in range(10, 14)]
+    for msgs in turns:
+        assert [m.get("cache", False) for m in msgs] == [False, True, True, False]
+        assert "<page>" in msgs[-1]["content"] and "PAGE" not in "".join(map(str, (m["content"] for m in msgs[1:-1])))
+    # system and task are identical every turn; while the window holds (past steps shown from 5) the history only
+    # gains parts, so each turn's history is a part-wise prefix of the next one's
+    for a, b in zip(turns, turns[1:]):
+        assert a[:2] == b[:2]
+        assert b[2]["content"][:len(a[2]["content"])] == a[2]["content"] and len(b[2]["content"]) == len(a[2]["content"]) + 1
+    # the window jumps, not creeps: from step 9 for the next four turns
+    later = build_messages("r", plan, _events(14), "PAGE", "2026-11-18")
+    assert "earlier steps omitted: 8" in later[2]["content"][0] and later[1] == turns[0][1]
 
 
 def test_page_text_that_tries_to_instruct_the_model_stays_inside_the_page_block(run, session, base_url):
@@ -143,7 +168,7 @@ def test_page_text_that_tries_to_instruct_the_model_stays_inside_the_page_block(
     from test_pilot.explorer import build_messages as bm
     from test_pilot.actions import Actor
     a = Actor(session, Policy(start_url=base_url))
-    msgs = bm("r", Plan(requirement_points=["p"]), [], a.look(), "2026-11-18")
+    msgs = _flat(bm("r", Plan(requirement_points=["p"]), [], a.look(), "2026-11-18"))
     text = msgs[1]["content"]
     assert "IGNORE PREVIOUS INSTRUCTIONS" in text.split("<page>")[1].split("</page>")[0]
     assert "IGNORE PREVIOUS INSTRUCTIONS" not in text.split("<page>")[0] and "IGNORE PREVIOUS" not in msgs[0]["content"]
@@ -281,3 +306,30 @@ def test_analyzer_with_an_empty_plan_uses_the_requirement():
 def test_the_analyzer_is_told_not_to_plan_payment_or_email():
     from test_pilot.analyzer import SYSTEM
     assert "never enters payment details" in SYSTEM and "cannot read email" in SYSTEM and "just before payment" in SYSTEM
+
+def test_on_look_hands_over_the_exact_page_the_model_is_shown(run):
+    looks = []
+    llm = Script(click("Search"), DONE)
+    run(llm, on_look=lambda obs, text: looks.append((obs, text)))
+    assert len(looks) == len(llm.prompts) == 2
+    for (obs, text), prompt in zip(looks, llm.prompts):
+        assert f"<page>\n{text}\n</page>" in prompt[1]["content"] and obs.url.endswith("/form.html")
+
+
+def test_tracing_records_the_explorers_own_look_and_never_reads_the_browser(run, session, tmp_path, monkeypatch):
+    from tests.trace_explorer import TraceLLM
+    plain = Script(click("Search"), DONE)
+    reads = []
+    real = session.observe
+    monkeypatch.setattr(session, "observe", lambda *a, **k: reads.append(1) or real(*a, **k))
+    run(plain)
+    plain_reads, reads[:] = len(reads), []
+    inner = Script(click("Search"), DONE)
+    traced = TraceLLM(inner, tmp_path)
+    r = run(traced, on_look=traced.on_look)
+    assert r.stop_reason == "done" and len(reads) == plain_reads            # tracing adds no page reads
+    turns = sorted(p.name for p in tmp_path.iterdir())
+    assert turns == ["turn-001", "turn-002", "turn-003"]                    # plan, then two decisions
+    assert not (tmp_path / "turn-001" / "page.txt").exists()               # the plan comes before any look
+    page = (tmp_path / "turn-002" / "page.txt").read_text()
+    assert f"<page>\n{page}\n</page>" in inner.prompts[0][1]["content"]

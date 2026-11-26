@@ -3,8 +3,10 @@
 Run:
   conda run -n tp python -m tests.trace_explorer https://phptravels.net "book a flight" --provider openrouter --headed
 
-No source code is modified by this script. It records every model prompt/reply,
-page snapshot, element ID, browser diff, and replayable step under artifacts/traces/<timestamp>/.
+It runs exactly what `test-pilot explore` runs (same explorer, LLM settings, call budget, browser options and exit
+code) and records, under artifacts/traces/<timestamp>/, every model prompt and reply, the page the model was shown
+(page.txt) and the full page from the same observation (page_full.txt), element ids and locators, and each step.
+It never reads the browser on its own, so tracing does not change the run.
 """
 from __future__ import annotations
 
@@ -14,9 +16,13 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from test_pilot import BrowserConfig, BrowserSession
-from test_pilot.explorer import explore
-from test_pilot.llm import LLM, LLMConfig
+from test_pilot.cli import exit_code
+from test_pilot.explorer import call_budget, explore
+from test_pilot.llm import LLM, LLMConfig, LLMError
+from test_pilot.models import Observation
 from test_pilot.render import render
 
 
@@ -33,22 +39,29 @@ def text_write(path: Path, text: str) -> None:
 
 
 class TraceLLM:
-    def __init__(self, llm: LLM, session: BrowserSession, turn_dir: Path):
+    """Records each model request with the page it was made from. It never touches the browser itself: the page is
+    the observation the explorer already took (handed over by explore's on_look), so a traced run behaves exactly
+    like `test-pilot explore`."""
+
+    def __init__(self, llm: LLM, turn_dir: Path):
         self.llm = llm
-        self.session = session
         self.turn_dir = turn_dir
         self.usage = llm.usage
         self.calls = 0
+        self.look: tuple[Observation, str] | None = None  # the latest (observation, page text shown to the model)
 
-    def structured(self, messages, schema):
-        self.calls += 1
+    def on_look(self, obs: Observation, page_text: str) -> None:
+        self.look = (obs, page_text)
 
-        # Capture the live browser state before the model answer and link it to this exact request.
-        obs = self.session.observe()
-        snapshot = {
+    def _snapshot(self) -> dict | None:
+        if self.look is None:  # the plan request comes before the first look
+            return None
+        obs, page_text = self.look
+        return {
             "url": obs.url,
             "title": obs.title,
-            "rendered_page": render(obs, max_chars=20000, window=False),
+            "model_page": page_text,
+            "full_page": render(obs, max_chars=20000, window=False),
             "elements": [
                 {
                     "id": e.id,
@@ -64,17 +77,27 @@ class TraceLLM:
             ],
         }
 
+    def structured(self, messages, schema):
+        self.calls += 1
+        snapshot = self._snapshot()
+        self.look = None  # a repeated request without a new look (a retry) gets no stale snapshot
+
         turn_dir = self.turn_dir / f"turn-{self.calls:03d}"
         turn_dir.mkdir(parents=True, exist_ok=True)
         json_write(turn_dir / "messages.json", messages)
-        json_write(turn_dir / "live_snapshot.json", snapshot)
-        text_write(turn_dir / "page.txt", snapshot["rendered_page"])
+        if snapshot is not None:
+            json_write(turn_dir / "snapshot.json", snapshot)
+            text_write(turn_dir / "page.txt", snapshot["model_page"])
+            text_write(turn_dir / "page_full.txt", snapshot["full_page"])
 
         print("\n" + "=" * 100)
         print(f"MODEL TURN {self.calls} — {schema.__name__}")
         print("=" * 100)
         for message in messages:
-            print(f"\n[{message['role'].upper()}]\n{message['content']}\n")
+            content = message["content"]
+            if isinstance(content, list):  # a message sent in several parts (history, split for prompt caching)
+                content = "".join(content)
+            print(f"\n[{message['role'].upper()}]\n{content}\n")
 
         reply = self.llm.structured(messages, schema)
         json_write(turn_dir / "reply.json", reply)
@@ -112,8 +135,10 @@ def main() -> int:
     parser.add_argument("--provider", default=None)
     parser.add_argument("--model", default=None)
     parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--cdp-url", help="connect to a remote Chromium (default: env TEST_PILOT_CDP_URL)")
     parser.add_argument("--max-steps", type=int, default=25)
     parser.add_argument("--max-seconds", type=float, default=300)
+    load_dotenv()  # as the CLI does
     args = parser.parse_args()
 
     trace_root = Path("artifacts/traces") / utc_stamp()
@@ -121,7 +146,13 @@ def main() -> int:
     tee = Tee(trace_root / "trace.txt")
     sys.stdout = tee
 
-    config = LLMConfig.from_env(args.provider, args.model)
+    try:
+        config = LLMConfig.from_env(args.provider, args.model)
+    except LLMError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if config.max_calls is None:  # the same safety net as `test-pilot explore`
+        config.max_calls = call_budget(args.max_steps)
     llm = LLM(config)
 
     event_log: list[dict] = []
@@ -143,11 +174,14 @@ def main() -> int:
                 if values:
                     print(f"  {key}: {values}")
 
-    with BrowserSession(BrowserConfig(headless=not args.headed)) as session:
-        traced = TraceLLM(llm, session, trace_root)
+    browser = BrowserConfig(headless=not args.headed)
+    if args.cdp_url:
+        browser.cdp_url = args.cdp_url
+    traced = TraceLLM(llm, trace_root)
+    with BrowserSession(browser) as session:
         report = explore(session, traced, args.url, args.requirement,
                          max_steps=args.max_steps, max_seconds=args.max_seconds,
-                         on_event=on_event)
+                         on_event=on_event, on_look=traced.on_look)
 
     report_path = trace_root / "exploration.json"
     report.save(str(report_path))
@@ -159,7 +193,8 @@ def main() -> int:
     print(f"stop_detail: {report.stop_detail}")
     print(f"report: {report_path}")
     print(f"turns: {trace_root}")
-    return 0
+    print(f"usage: {report.usage}")
+    return exit_code(report)
 
 
 if __name__ == "__main__":
