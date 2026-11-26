@@ -96,8 +96,8 @@ class Observation(BaseModel):
     dialogs: list[str] = Field(default_factory=list)
     pending_requests: int = 0
     nav_error: str | None = None
-    blocked: bool = False  # a modal dialog covers the page: its lines come first
-    modal: bool = False  # ...and it is a real modal (role=dialog / aria-modal / <dialog>): the page behind it is unusable
+    blocked: bool = False  # an overlay sits over the middle of the page: its lines come first
+    modal: bool = False  # ...and clicks cannot reach the page behind it (a backdrop, or a modal <dialog>)
     scroll_y: float = 0.0  # where the viewport sits in the document
     viewport_w: float = 0.0
     viewport_h: float = 0.0  # 0 = unknown: the view is not windowed

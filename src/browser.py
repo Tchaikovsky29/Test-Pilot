@@ -13,7 +13,7 @@ from .models import Observation
 from .perceive import Perceiver
 from .render import DEFAULT_MAX_CHARS, render
 from .text import clip, quote
-from .watch import PageWatcher, describe_change
+from .watch import PageWatcher
 
 
 class NavigationError(Exception):
@@ -130,7 +130,3 @@ class BrowserSession:
             return self.watcher.probe()
         except PlaywrightError:
             return None
-
-    @staticmethod
-    def change(before: dict | None, after: dict | None) -> str:
-        return describe_change(before, after)

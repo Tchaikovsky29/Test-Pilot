@@ -6,7 +6,7 @@ from urllib.parse import urldefrag
 
 from pydantic import BaseModel, Field
 
-from .models import Observation
+from .models import Element, Observation
 from .text import clip, fold
 
 MAX_LINES = 8  # per kind, in what the model reads; `Changes` itself keeps everything for the test designer
@@ -30,13 +30,18 @@ def _texts(obs: Observation, kinds: tuple[str, ...]) -> dict[str, str]:
     return {fold(ln.text): ln.text for ln in obs.lines if ln.kind in kinds}
 
 
-def _errors(obs: Observation) -> dict[int, str]:
-    out: dict[int, str] = {}
+def field_errors(obs: Observation) -> list[tuple[Element, str]]:
+    """Fields in error right now, with their message: the browser's own, or the page's for an aria-invalid field."""
+    out = []
     for e in obs.elements:
         msg = e.validation or (e.description if "invalid" in e.states else "")
         if msg:
-            out[e.id] = f"{e.display_name or e.widget}: {msg}"
+            out.append((e, msg))
     return out
+
+
+def _errors(obs: Observation) -> dict[int, str]:
+    return {e.id: f"{e.display_name or e.widget}: {msg}" for e, msg in field_errors(obs)}
 
 
 def diff(before: Observation | None, after: Observation) -> Changes:

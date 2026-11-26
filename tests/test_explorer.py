@@ -77,7 +77,8 @@ def test_valid_then_invalid_flow_is_recorded_with_evidence(run):
     assert r.code == ['page.get_by_role("button", name="Search", exact=True).click()',
                       'page.get_by_role("textbox", name="City", exact=True).press_sequentially("Pune")',
                       'page.get_by_role("button", name="Search", exact=True).click()']
-    assert len(r.steps) == 3 and r.steps[1]["value"] == "Pune"
+    steps = [e.step for e in r.events if e.step]                     # each event keeps its replayable step
+    assert len(steps) == 3 and steps[1].value == "Pune"
 
 
 def test_pages_record_fields_constraints_and_values_tried(run):
@@ -261,7 +262,7 @@ def test_a_payment_step_is_recorded_and_ends_the_path(run):
     llm = Script(click("Pay now"), DONE)
     r = run(llm, path="/checkout.html")
     assert r.events[0].status == "stopped" and "a person must do this" in r.stopped_at
-    assert r.stop_reason == "done" and r.steps == []
+    assert r.stop_reason == "done" and [e.step for e in r.events] == [None] and r.code == []
     assert "STOPPED" in llm.prompts[1][1]["content"]
 
 

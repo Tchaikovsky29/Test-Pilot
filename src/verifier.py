@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, model_validator
 from .actions import Action, ActionResult, Actor, Click, GoBack, Press, Select, Step, Type
 from .browser import BrowserConfig, BrowserSession, NavigationError
 from .designer import AssertKind, CaseStep, DesignResult, ExpectKind, Expectation, Gap, TestCase
-from .evidence import Changes
+from .evidence import Changes, field_errors
 from .explorer import ACTIONS_HELP, LIMITS_RULES, PAGE_VIEW_RULES
 from .llm import LLMError
 from .locators import ensure_locator
@@ -260,15 +260,6 @@ def _contains(haystack: list[str], needle: str) -> bool:
     return bool(n) and any(n in fold(h) for h in haystack if h)
 
 
-def _field_errors(obs: Observation) -> list[tuple[Element, str]]:
-    out = []
-    for e in obs.elements:
-        msg = e.validation or (e.description if "invalid" in e.states else "")
-        if msg:
-            out.append((e, msg))
-    return out
-
-
 def _locator_for(run: _Run, e: Element) -> Locator | None:
     try:
         return ensure_locator(run.actor.session.page, e, run.actor.obs.elements)
@@ -276,67 +267,91 @@ def _locator_for(run: _Run, e: Element) -> Locator | None:
         return None
 
 
+class _Seen:
+    """The page now and what the last step changed, read once for all of a case's checks."""
+
+    def __init__(self, run: _Run):
+        self.run, self.obs, self.last = run, run.actor.obs, run.last_changes()
+        self.page = [ln.text for ln in self.obs.lines] + [e.display_name for e in self.obs.elements]
+        self.errors = field_errors(self.obs)
+        self.alerts = [ln.text for ln in self.obs.lines if ln.kind == "alert"] + self.last.alerts + run.dialogs
+        # a page-level message after a step that stayed put: an alert region, a native dialog, or a plain toast
+        self.notice = (self.alerts or ([] if self.last.navigated else self.last.appeared))[:1]
+
+    def on(self, e: Element, kind, value: str, **kw) -> Assertion:
+        return Assertion(kind=kind, value=value, locator=_locator_for(self.run, e), frame_url=e.frame_url, **kw)
+
+
+# Each check returns (status, actual, assertion). "corrected" only ever replaces a value the designer guessed.
+Outcome = tuple[str, str, Assertion | None]
+
+
+def _text_visible(s: _Seen, x: Expectation) -> Outcome:
+    if _contains(s.page + s.last.appeared + s.last.alerts, x.value):
+        return "confirmed", "", Assertion(kind=x.kind, value=x.value)
+    e = next((e for e in s.obs.elements if e.value and _contains([e.value], x.value)), None)
+    if e is not None:  # held by a field: a typed or picked date is not page text
+        return "confirmed", "", s.on(e, "field_value", e.value)
+    return "not_seen", "", None
+
+
+def _text_gone(s: _Seen, x: Expectation) -> Outcome:
+    if not _contains(s.page, x.value):
+        return "confirmed", "", Assertion(kind=x.kind, value=x.value)
+    return "not_seen", "", None
+
+
+def _url_contains(s: _Seen, x: Expectation) -> Outcome:
+    want = fold(x.value).strip()
+    if want and want in fold(s.obs.url):
+        return "confirmed", "", Assertion(kind=x.kind, value=x.value)
+    return "not_seen", s.obs.url, None
+
+
+def _element_visible(s: _Seen, x: Expectation) -> Outcome:
+    e = next((e for e in s.obs.elements if _contains([e.display_name], x.value)), None)
+    return ("confirmed", "", s.on(e, x.kind, x.value)) if e is not None else ("not_seen", "", None)
+
+
+def _field_error(s: _Seen, x: Expectation) -> Outcome:
+    hit = next(((e, m) for e, m in s.errors if _contains([m, f"{e.display_name}: {m}"], x.value)), None)
+    if hit is not None:
+        return "confirmed", "", s.on(hit[0], x.kind, hit[1], native=bool(hit[0].validation))
+    if _contains(s.last.errors, x.value):  # reported, but the field is no longer in error
+        return "confirmed", "", Assertion(kind="text_visible", value=x.value)
+    if not x.observed and s.errors:  # a guessed message: the field's own one is the fact
+        e, m = s.errors[0]
+        return "corrected", m, s.on(e, x.kind, m, native=bool(e.validation))
+    if not x.observed and s.notice:  # many sites report a missing field in a page-level message instead
+        msg = clip(s.notice[0], 200)
+        return "corrected", msg, Assertion(kind="alert" if s.alerts else "text_visible", value=msg)
+    shown = "; ".join(f"{e.display_name}: {m}" for e, m in s.errors[:3])
+    return "not_seen", shown, None
+
+
+def _alert(s: _Seen, x: Expectation) -> Outcome:
+    if _contains(s.alerts, x.value):
+        return "confirmed", "", Assertion(kind=x.kind, value=x.value)
+    if not x.observed and s.alerts:
+        msg = clip(s.alerts[0], 200)
+        return "corrected", msg, Assertion(kind=x.kind, value=msg)
+    return "not_seen", "", None
+
+
+_CHECKS = {"text_visible": _text_visible, "text_gone": _text_gone, "url_contains": _url_contains,
+           "element_visible": _element_visible, "field_error": _field_error, "alert": _alert}
+
+
 def check(run: _Run, expected: list[Expectation]) -> tuple[list[ExpectationResult], list[Assertion]]:
     """Each expected outcome against the page now and what the last step changed. An outcome the designer only
     guessed (never observed) that is contradicted by a concrete message is corrected to what the page said."""
-    obs, last = run.actor.obs, run.last_changes()
-    page = [ln.text for ln in obs.lines] + [e.display_name for e in obs.elements]
-    values = [e.value for e in obs.elements if e.value]  # what fields hold: a typed date is not page text
-    errors = _field_errors(obs)
-    alerts = [ln.text for ln in obs.lines if ln.kind == "alert"] + last.alerts + run.dialogs
+    seen = _Seen(run)
     results, asserts = [], []
     for x in expected:
-        res = ExpectationResult(kind=x.kind, expected=x.value, status="not_seen")
-        a: Assertion | None = None
-        if x.kind == "text_visible" and _contains(page + last.appeared + last.alerts, x.value):
-            res.status, a = "confirmed", Assertion(kind=x.kind, value=x.value)
-        elif x.kind == "text_visible" and _contains(values, x.value):
-            e = next(e for e in obs.elements if e.value and _contains([e.value], x.value))
-            res.status = "confirmed"
-            a = Assertion(kind="field_value", value=e.value, locator=_locator_for(run, e), frame_url=e.frame_url)
-        elif x.kind == "text_gone" and not _contains(page, x.value):
-            res.status, a = "confirmed", Assertion(kind=x.kind, value=x.value)
-        elif x.kind == "url_contains" and fold(x.value).strip() and fold(x.value).strip() in fold(obs.url):
-            res.status, a = "confirmed", Assertion(kind=x.kind, value=x.value)
-        elif x.kind == "element_visible":
-            e = next((e for e in obs.elements if _contains([e.display_name], x.value)), None)
-            if e is not None:
-                res.status = "confirmed"
-                a = Assertion(kind=x.kind, value=x.value, locator=_locator_for(run, e), frame_url=e.frame_url)
-        elif x.kind == "field_error":
-            hit = next(((e, m) for e, m in errors if _contains([m, f"{e.display_name}: {m}"], x.value)), None)
-            if hit is None and errors and not x.observed:  # a guessed message: the page's own one is the fact
-                hit = errors[0]
-                res.status, res.actual = "corrected", hit[1]
-            elif hit is not None:
-                res.status = "confirmed"
-            elif not errors and not x.observed and (last.alerts or run.dialogs or (last.appeared and not last.navigated)):
-                # Sites often report a missing field in a page-level message (an alert region, a native dialog, or a
-                # plain toast) rather than on the field itself. A toast only counts if the step stayed on the page:
-                # a failed validation does not navigate.
-                msg = (last.alerts or run.dialogs or last.appeared)[0]
-                res.status, res.actual = "corrected", clip(msg, 200)
-                a = Assertion(kind="alert" if (last.alerts or run.dialogs) else "text_visible", value=res.actual)
-            if hit is not None:
-                e, m = hit
-                a = Assertion(kind=x.kind, value=m, locator=_locator_for(run, e), frame_url=e.frame_url,
-                              native=bool(e.validation))
-            elif _contains(last.errors, x.value):
-                res.status, a = "confirmed", Assertion(kind="text_visible", value=x.value)
-        elif x.kind == "alert":
-            if _contains(alerts, x.value):
-                res.status, a = "confirmed", Assertion(kind=x.kind, value=x.value)
-            elif alerts and not x.observed:
-                res.status, res.actual = "corrected", clip(alerts[0], 200)
-                a = Assertion(kind=x.kind, value=res.actual)
-        if res.status == "not_seen":
-            if x.kind == "field_error" and errors:
-                res.actual = "; ".join(f"{e.display_name}: {m}" for e, m in errors[:3])
-            elif x.kind == "url_contains":
-                res.actual = obs.url
-            elif last.appeared or last.alerts or last.errors:
-                res.actual = clip("; ".join((last.alerts + last.errors + last.appeared)[:4]), 300)
-        results.append(res)
+        status, actual, a = _CHECKS[x.kind](seen, x)
+        if status == "not_seen" and not actual and (seen.last.appeared or seen.last.alerts or seen.last.errors):
+            actual = clip("; ".join((seen.last.alerts + seen.last.errors + seen.last.appeared)[:4]), 300)
+        results.append(ExpectationResult(kind=x.kind, expected=x.value, status=status, actual=actual))
         if a is not None and not any((b.kind, b.value, b.locator) == (a.kind, a.value, a.locator) for b in asserts):
             asserts.append(a)  # several guesses can resolve to the same message: check it once
     return results, asserts

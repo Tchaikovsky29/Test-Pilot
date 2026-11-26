@@ -22,6 +22,7 @@ from .explorer import Event, ExplorationReport, call_budget, explore
 from .llm import LLM, PROVIDERS, LLMConfig, LLMError
 from .locators import verify_all
 from .render import DEFAULT_MAX_CHARS, render
+from .text import clip
 
 
 class _Ping(BaseModel):
@@ -162,13 +163,9 @@ def _design(args) -> int:
 
 
 def _print_verified(v: VerifiedCase) -> None:
-    print(f"{v.case.id} {v.status.upper():<11} {clip_title(v.case.title)}  ({v.elapsed_s}s)")
+    print(f"{v.case.id} {v.status.upper():<11} {clip(v.case.title, 70)}  ({v.elapsed_s}s)")
     if v.reason:
         print(f"     {v.reason}")
-
-
-def clip_title(t: str, n: int = 70) -> str:
-    return t if len(t) <= n else t[:n - 1] + "…"
 
 
 def _verify(args) -> int:

@@ -55,9 +55,11 @@ def _fit(src: list[str], budget: float) -> int:
 # ---- what to leave out before any trimming --------------------------------------------------------------------------
 
 def _dialog_block(obs: Observation) -> tuple[list[Line], int] | None:
-    """(the dialog's lines, how many page controls are hidden behind it), when a real modal with at least one control
-    is open. A modal with no control to press is left alone: hiding the page then could leave the model stuck."""
-    if not obs.blocked:
+    """(the dialog's lines, how many page controls are hidden behind it), when an overlay leaves the page behind it
+    unclickable and has at least one control of its own. Then only the dialog matters: nothing else can be clicked.
+    An overlay the page can be clicked around (a banner, a popup without a backdrop) is listed first, but the page
+    stays. A dialog with no control to press is left alone too: hiding the page could leave the model stuck."""
+    if not obs.modal:
         return None
     inside: list[Line] = []
     hidden, in_dialog = 0, False

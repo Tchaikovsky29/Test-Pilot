@@ -142,7 +142,7 @@ What the perception layer does:
 - **Hidden text is dropped.** `opacity:0` and `display:none` text, such as a pre-rendered "Booking confirmed!" banner, never reaches the model.
 - **Widgets.** Native `select` shows its options, native date inputs show as `date`, and `required`, `readonly`, `disabled`, `checked` and `invalid` states are shown.
 - **Div widgets without accessibility roles** (custom tabs, dropdowns, date-picker triggers) appear as `clickable`. They are found from click listeners and `cursor:pointer`, using Chrome's DOM snapshot.
-- **Blocking dialogs come first.** A modal is detected from the element at the centre of the viewport and is shown first, even if it is last in the document. `Observation.blocked` is set.
+- **Dialogs come first.** An overlay is found from the element at the centre of the viewport and listed first, even if it is last in the document (`Observation.blocked`). If clicks cannot reach the page behind it (a backdrop, or a modal `<dialog>`), only the dialog is listed (`Observation.modal`): nothing else can be clicked. This is tested by hit-testing points near the screen's edges. An overlay the page can be clicked around, like a banner or a popup without a backdrop, leaves the page listed.
 - **Secrets are masked.** Password values show as `(hidden)` and never enter the observation, the JSON or the logs.
 - **Icon-font noise is cleaned.** `hotel Stays` is shown as `Stays` and `Economy expand_more` as `Economy`. Locators keep the raw name and add an icon-free, non-exact variant.
 - **Waiting without sleeps.** The page is settled when the DOM has been quiet and no recent request is pending.

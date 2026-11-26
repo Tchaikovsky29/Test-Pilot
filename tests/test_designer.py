@@ -1,8 +1,6 @@
 """The designer's own checks: what the model proposes is tied back to the recorded evidence, never taken on trust."""
 import json
 
-import pytest
-
 from test_pilot.actions import Step
 from test_pilot.analyzer import Plan
 from test_pilot.cli import main as cli_main

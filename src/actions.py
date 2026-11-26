@@ -9,7 +9,7 @@ import re
 from typing import Annotated, Literal, Union
 
 from playwright.sync_api import Error as PlaywrightError
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field
 
 from .browser import BrowserSession
 from .evidence import Changes, diff, render_changes
@@ -67,12 +67,6 @@ class GoBack(BaseModel):
 
 
 Action = Annotated[Union[Click, Type, Select, Press, Scroll, Wait, GoBack], Field(discriminator="kind")]
-_ACTION = TypeAdapter(Action)
-
-
-def parse_action(data: dict | str) -> Action:
-    """Validate model output; raises pydantic.ValidationError on anything that is not a known action."""
-    return _ACTION.validate_json(data) if isinstance(data, str) else _ACTION.validate_python(data)
 
 
 # ---- what comes back ----------------------------------------------------------------------------------------------

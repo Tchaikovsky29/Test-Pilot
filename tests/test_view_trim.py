@@ -1,4 +1,4 @@
-"""Checks for the trimmed page view: modal-only, viewport windowing, shorter changes and history, and the two
+"""Checks for the trimmed page view: only the dialog when the page behind it cannot be clicked, viewport windowing, shorter changes and history, and the two
 perception pieces that feed them (layout_positions, and the walker's modal/position tracking on a fake AX tree).
 Run with `pytest tests/test_view_trim.py`, or `python tests/test_view_trim.py`."""
 from test_pilot.evidence import Changes, render_changes
@@ -52,11 +52,12 @@ def test_modal_without_a_control_keeps_the_page():  # hiding the page here could
     assert '"Search"' in render(obs(lines, page, blocked=True, modal=True))
 
 
-def test_window_false_lists_everything():  # what the explorer uses after two failed actions
+def test_window_false_lists_the_whole_page_but_not_behind_a_blocking_dialog():  # after two failed actions
     dl, de = dialog([])
     page = [el(1, name="Search")]
-    out = render(obs(dl + [ctl(page[0], y=100)], de + page, blocked=True, modal=True), window=False)
-    assert '"Search"' in out
+    soft = render(obs(dl + [ctl(page[0], y=100)], de + page, blocked=True, modal=False), window=False)
+    blocking = render(obs(dl + [ctl(page[0], y=100)], de + page, blocked=True, modal=True), window=False)
+    assert '"Search"' in soft and '"Search"' not in blocking            # nothing behind it can be clicked anyway
 
 
 # ---- scrolling: only the part near the viewport is listed --------------------------------------------------------------
@@ -152,24 +153,12 @@ def _walk(dom, overlay, root_kids, dialog_role="dialog"):
     return w, lines
 
 
-def test_walker_marks_real_modals_and_positions_lines():
+def test_walker_hoists_the_overlay_and_positions_lines():
     dom = {2: DomInfo("DIV", {}), 3: DomInfo("DIV", {"role": "dialog"}), 5: DomInfo("BUTTON", {}),
            20: DomInfo("INPUT", {"type": "text"})}
     w, lines = _walk(dom, 2, ["2", "10", "20", "31"])
-    assert w.overlay_hard and [l.text for l in w.overlay_lines if l.kind == "heading"] == ["Notice"]
+    assert [l.text for l in w.overlay_lines if l.kind == "heading"] == ["Notice"]
     assert [(l.kind, l.y) for l in lines] == [("heading", 100.0), ("control", 160.0), ("text", 2500.0)]
-
-
-def test_walker_does_not_call_a_plain_fixed_layer_a_modal():
-    dom = {2: DomInfo("DIV", {}), 3: DomInfo("DIV", {}), 5: DomInfo("BUTTON", {})}
-    w, _ = _walk(dom, 2, ["2", "10", "20", "31"], dialog_role="generic")
-    assert w.overlay_lines and not w.overlay_hard
-
-
-def test_aria_modal_attribute_counts():
-    dom = {2: DomInfo("DIV", {"aria-modal": "true"}), 5: DomInfo("BUTTON", {})}
-    w, _ = _walk(dom, 2, ["2", "10", "20", "31"])
-    assert w.overlay_hard
 
 
 def test_walker_excludes_month_grid_wrapper_but_keeps_day_controls():

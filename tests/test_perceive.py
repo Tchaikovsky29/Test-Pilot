@@ -4,6 +4,7 @@ from test_pilot import NavigationError, validate_url
 from test_pilot.locators import is_dynamic_id, verify_locators
 from test_pilot.render import render
 from test_pilot.text import clean_name, is_icon_text  # noqa: E402
+from test_pilot.watch import describe_change
 
 # ---- URL handling (no browser) -------------------------------------------------------------------------------
 
@@ -123,12 +124,12 @@ def test_change_detection(flight):
     before = flight.snapshot()
     flight.page.click("#go")
     flight.observe()
-    assert flight.change(before, flight.snapshot()) == "page changed"
+    assert describe_change(before, flight.snapshot()) == "page changed"
     before = flight.snapshot()
-    assert flight.change(before, flight.snapshot()) == "no change"
+    assert describe_change(before, flight.snapshot()) == "no change"
     flight.page.click("text=Hotels")
     flight.observe()
-    assert flight.change(before, flight.snapshot()).startswith("navigated to")
+    assert describe_change(before, flight.snapshot()).startswith("navigated to")
 
 
 def test_dialogs_are_handled_and_reported(flight):

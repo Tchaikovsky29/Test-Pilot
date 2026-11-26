@@ -1,6 +1,6 @@
 import pytest
 
-from test_pilot.actions import Actor, Click, GoBack, Press, Select, Type, parse_action
+from test_pilot.actions import Actor, Click, GoBack, Press, Select, Type
 from test_pilot.policy import Policy
 
 
@@ -202,13 +202,14 @@ def test_recorded_steps_replay_as_code(make):
 
 # ---- parsing what the model sends ---------------------------------------------------------------------------------
 
-def test_parse_action():
-    assert parse_action({"kind": "click", "id": 3}) == Click(id=3)
-    assert parse_action('{"kind": "type", "id": 3, "text": "x", "keys": true}').keys is True
+def test_only_known_well_formed_actions_are_accepted():
+    from test_pilot.explorer import Decision
+    assert Decision.model_validate({"action": {"kind": "click", "id": 3}}).action == Click(id=3)
+    assert Decision.model_validate_json('{"action": {"kind": "type", "id": 3, "text": "x", "keys": true}}').action.keys
     with pytest.raises(Exception):
-        parse_action({"kind": "format_disk"})
+        Decision.model_validate({"action": {"kind": "format_disk"}})
     with pytest.raises(Exception):
-        parse_action({"kind": "click"})                                       # id is required
+        Decision.model_validate({"action": {"kind": "click"}})                # id is required
 
 
 def test_typing_an_autocomplete_uses_keys(make):

@@ -107,7 +107,6 @@ class ExplorationReport(BaseModel):
     plan_problem: str = ""
     events: list[Event] = Field(default_factory=list)
     pages: list[PageInfo] = Field(default_factory=list)
-    steps: list[dict] = Field(default_factory=list)  # successful Steps, for the compiler
     code: list[str] = Field(default_factory=list)
     stop_reason: StopReason = "done"
     stop_detail: str = ""
@@ -275,6 +274,26 @@ class _Stuck:
             n += 1
         return n
 
+    def verdict(self) -> tuple[str, str]:
+        """(a warning for the model, or why to stop). Both empty while things are moving."""
+        if self.repeats() >= 4:
+            return "", "the same action was repeated 4 times on the same page"
+        if self.fails >= MAX_FAILS_IN_A_ROW:
+            return "", f"{self.fails} actions in a row failed"
+        if self.repeats() >= 3:
+            return ("you have repeated the same action on the same page with no progress. The page may be covered by "
+                    "a popup or overlay. Choose a visible close/accept control or a different action; do not repeat "
+                    "the blocked action."), ""
+        return "", ""
+
+
+def note_value_tried(pages: dict[str, PageInfo], page: str, field_name: str, value: str) -> None:
+    """Remember what was typed into a field, so the designer knows which inputs were already tried."""
+    info = pages.get(page)
+    for f in info.fields if info else []:
+        if f.name == field_name and value not in f.values_tried:
+            f.values_tried.append(value)
+
 
 # ---- the loop -----------------------------------------------------------------------------------------------------
 
@@ -312,12 +331,19 @@ def explore(session: BrowserSession, llm, url: str, requirement: str, *, policy:
             pending = None
         report.stop_reason, report.stop_detail = reason, detail
         report.pages = list(pages.values())
-        report.steps = [s.model_dump(mode="json") for s in actor.steps] if actor else []
         report.code = [s.code() for s in actor.steps] if actor else []
         report.summary = observed_summary(report.requirement, report.events)
         report.usage = llm.usage.summary() if hasattr(llm, "usage") else ""
         report.elapsed_s = round(time.monotonic() - t0, 1)
         return report
+
+    def read_last_effect() -> None:
+        """Look once more so the last action's changes are recorded before stopping."""
+        try:
+            actor.look()
+            attach()
+        except Exception:
+            pass
 
     try:
         session.goto(url)
@@ -343,13 +369,9 @@ def explore(session: BrowserSession, llm, url: str, requirement: str, *, policy:
         if on_look:
             on_look(actor.obs, page_text)
 
-        warning = ""
-        if stuck.repeats() >= 3:
-            warning = "you have repeated the same action on the same page with no progress. The page may be covered by a popup or overlay. Choose a visible close/accept control or a different action; do not repeat the blocked action."
-        if stuck.repeats() >= 4:
-            return finish("stuck", "the same action was repeated 4 times on the same page")
-        if stuck.fails >= MAX_FAILS_IN_A_ROW:
-            return finish("stuck", f"{stuck.fails} actions in a row failed")
+        warning, stop = stuck.verdict()
+        if stop:
+            return finish("stuck", stop)
 
         try:
             decision = llm.structured(build_messages(requirement, plan, report.events, page_text, today, warning), Decision)
@@ -369,29 +391,16 @@ def explore(session: BrowserSession, llm, url: str, requirement: str, *, policy:
                              code=result.step.code() if result.step else "", step=result.step)
         report.events.append(ev)
         stuck.record(ev)
-        if decision.action.kind == "type" and result.ok:
-            el = actor.obs.element(decision.action.id)
-            info = pages.get(ev.page)
-            if el and info:
-                for f in info.fields:
-                    if f.name == (el.display_name or el.widget) and decision.action.text not in f.values_tried:
-                        f.values_tried.append(decision.action.text)
+        el = actor.obs.element(decision.action.id) if decision.action.kind == "type" and result.ok else None
+        if el is not None:
+            note_value_tried(pages, ev.page, el.display_name or el.widget, decision.action.text)
         if result.status == "stopped":
             report.stopped_at = report.stopped_at or result.message
             stops += 1
             if stops >= 2:
-                try:
-                    actor.look()
-                    attach()
-                except Exception:
-                    pass
+                read_last_effect()
                 return finish("needs_person", report.stopped_at)
-    # out of steps: read the effect of the last action so its evidence is not lost
-    try:
-        actor.look()
-        attach()
-    except Exception:
-        pass
+    read_last_effect()  # out of steps: the last action's evidence is not lost
     return finish("max_steps", f"stopped after {max_steps} steps")
 
 

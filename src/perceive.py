@@ -64,6 +64,23 @@ OVERLAY_JS = r"""(() => {
   return found;
 })()"""
 
+# Called on the overlay found above: can the page behind it still be clicked? A modal <dialog> makes it inert; otherwise
+# points near the screen's edges (where a centred dialog box does not reach) are hit-tested. If most of them land on
+# the overlay (its backdrop), clicks cannot reach the page. A backdrop with pointer-events:none lets clicks through, and
+# elementFromPoint sees through it the same way.
+COVERS_JS = r"""function () {
+  try { if (this.matches(':modal') || this.querySelector(':modal')) return true; } catch (err) {}
+  const w = innerWidth, h = innerHeight, xs = [0.04, 0.5, 0.96], ys = [0.04, 0.5, 0.96];
+  let hit = 0, total = 0;
+  for (const fx of xs) for (const fy of ys) {
+    if (fx === 0.5 && fy === 0.5) continue;  // the centre is the dialog itself
+    total++;
+    const e = document.elementFromPoint(fx * w, fy * h);
+    if (e && this.contains(e)) hit++;
+  }
+  return hit >= total - 2;
+}"""
+
 # Fields the browser currently reports as wrong. :user-invalid only matches after an interaction or a submit attempt,
 # so a pristine form with empty required fields reports nothing: only real feedback is evidence for a test.
 VALIDATION_JS = r"""(() => {
@@ -221,7 +238,6 @@ class _FrameWalker:
         self.tops = tops or {}
         self.text_pos: tuple[float, float] | None = None  # where the first text node of the pending line sits
         self.in_overlay = False
-        self.overlay_hard = False  # the overlay holds role=dialog / aria-modal / <dialog>: the page behind is unusable
 
     def flush(self) -> None:
         if not self.text:
@@ -243,7 +259,6 @@ class _FrameWalker:
             saved_lines = self.lines
             self.lines = []
             self.in_overlay = True
-            self._note_modal(node)
             kids = [self.by_id.get(c) for c in node.get("childIds") or []]
             for c in kids:
                 if c:
@@ -257,7 +272,6 @@ class _FrameWalker:
         role = "" if role is None else str(role)
         name = norm(_val(node.get("name")))
         kids = [self.by_id.get(c) for c in node.get("childIds") or []]
-        self._note_modal(node)
         if node.get("ignored"):
             for c in kids:
                 self.walk(c, inside)
@@ -332,14 +346,6 @@ class _FrameWalker:
     def _line(self, kind: str, pos: tuple[float, float] | None = None, **kw) -> Line:
         x, y = pos if pos else (None, None)
         return Line(kind=kind, x=x, y=y, **kw)
-
-    def _note_modal(self, node: dict) -> None:
-        if not self.in_overlay or self.overlay_hard:
-            return
-        bid = node.get("backendDOMNodeId")
-        d = self.dom.get(bid) if bid is not None else None
-        if _val(node.get("role")) in ("dialog", "alertdialog") or (d and (d.tag == "DIALOG" or d.attrs.get("aria-modal") == "true")):
-            self.overlay_hard = True
 
     def _subtree_text(self, node: dict) -> str:
         parts: list[str] = []
@@ -462,18 +468,22 @@ class Perceiver:
 
         return self._retry(run)
 
-    def _overlay_bid(self) -> int | None:
+    def _overlay(self) -> tuple[int | None, bool]:
+        """(the overlay's backendNodeId, whether it leaves the page behind unclickable), or (None, False)."""
         try:
             r = self.cdp.send("Runtime.evaluate", {"expression": OVERLAY_JS, "returnByValue": False})
             oid = (r.get("result") or {}).get("objectId")
             if not oid:
-                return None
+                return None, False
             try:
-                return self.cdp.send("DOM.describeNode", {"objectId": oid})["node"].get("backendNodeId")
+                bid = self.cdp.send("DOM.describeNode", {"objectId": oid})["node"].get("backendNodeId")
+                covers = self.cdp.send("Runtime.callFunctionOn", {"objectId": oid, "functionDeclaration": COVERS_JS,
+                                                                  "returnByValue": True})
+                return bid, bool((covers.get("result") or {}).get("value"))
             finally:
                 self.cdp.send("Runtime.releaseObject", {"objectId": oid})
         except (PlaywrightError, KeyError):
-            return None
+            return None, False
         
     def _validation(self) -> dict[int, str]:
         """backendNodeId -> the browser's validation message, for fields that are in error right now."""
@@ -521,11 +531,10 @@ class Perceiver:
             visible = self._retry(lambda: self.page.evaluate(VISIBLE_JS))
         except PlaywrightError:
             visible = None
-        (clickables, tops, scroll_y, (view_w, view_h)), overlay, invalid = self._layout(), self._overlay_bid(), self._validation()
+        (clickables, tops, scroll_y, (view_w, view_h)), (overlay, covers), invalid = self._layout(), self._overlay(), self._validation()
         lines: list[Line] = []
         elements: list[Element] = []
         hoisted: list[Line] = []
-        modal = False
         for frame in frames:
             start = len(lines)
             # Text from a cross-origin frame is not in `visible`, so it is not filtered there.
@@ -539,7 +548,6 @@ class Perceiver:
                 _fill_positions(lines[start:])
             if walker.overlay_lines:
                 hoisted = walker.overlay_lines
-                modal = walker.overlay_hard
             if frame["url"] and len(lines) > start:
                 lines.insert(start, Line(kind="frame", text=frame["url"]))
         if hoisted:  # a modal dialog covers the page: show it first, whatever its place in the document
@@ -557,4 +565,4 @@ class Perceiver:
         dialogs, self.dialogs[:] = list(self.dialogs), []
         return Observation(url=info["url"], title=info["title"], lines=lines, elements=elements, dialogs=dialogs,
                            pending_requests=settled.get("pending", 0), nav_error=nav_error, blocked=bool(hoisted),
-                           modal=bool(hoisted) and modal, scroll_y=scroll_y, viewport_w=view_w, viewport_h=view_h)
+                           modal=bool(hoisted) and covers, scroll_y=scroll_y, viewport_w=view_w, viewport_h=view_h)
