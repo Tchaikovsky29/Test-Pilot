@@ -9,6 +9,8 @@ date handling, '*' for new elements); this is a fresh implementation on Playwrig
 """
 from __future__ import annotations
 
+import re
+
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -27,6 +29,7 @@ from .watch import PageWatcher, is_context_loss
 # Text actually shown, lowercased with whitespace collapsed. The AX tree keeps opacity:0 text (pre-rendered success
 # banners), which an agent would then report as success; checkVisibility with checkOpacity drops it.
 VISIBLE_JS = r"""() => {
+  // Closed shadow roots cannot be entered from page script: their text is judged from the layout snapshot instead.
   const out = [], shown = new Map(), roots = [document];
   for (let i = 0; i < roots.length; i++) {
     const walk = document.createTreeWalker(roots[i], NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
@@ -139,6 +142,40 @@ def layout_positions(snapshot: dict) -> tuple[dict[int, tuple[float, float]], fl
     return pos, float(doc.get("scrollOffsetY") or 0)
 
 
+def drawn_nodes(snapshot: dict) -> set[int]:
+    """backendNodeIds the main document actually paints: a layout box, not visibility:hidden, and no ancestor with
+    opacity 0 (opacity is not inherited, so the ancestors are checked). Reaches into closed shadow roots, which page
+    script cannot. Needs SNAPSHOT_STYLES' opacity and visibility."""
+    docs = snapshot.get("documents") or []
+    strings = snapshot.get("strings") or []
+    if not docs:
+        return set()
+    doc = docs[0]
+    nodes = doc.get("nodes") or {}
+    backend, parent = nodes.get("backendNodeId") or [], nodes.get("parentIndex") or []
+    layout = doc.get("layout") or {}
+    oi, vi = SNAPSHOT_STYLES.index("opacity"), SNAPSHOT_STYLES.index("visibility")
+    style: dict[int, tuple[str, str]] = {}
+    for ni, st in zip(layout.get("nodeIndex") or [], layout.get("styles") or []):
+        val = lambda k: strings[st[k]] if k < len(st) and 0 <= st[k] < len(strings) else ""  # noqa: E731
+        style[ni] = (val(oi), val(vi))
+    clear: dict[int, bool] = {}  # node index -> no ancestor (or itself) at opacity 0
+
+    def opaque(ni: int) -> bool:
+        chain = []
+        while ni >= 0 and ni not in clear:
+            chain.append(ni)
+            ni = parent[ni] if ni < len(parent) else -1
+        ok = clear.get(ni, True)
+        for n in reversed(chain):
+            ok = ok and style.get(n, ("1", ""))[0] not in ("0", "0.0")
+            clear[n] = ok
+        return ok
+
+    return {backend[ni] for ni, (_, vis) in style.items()
+            if ni < len(backend) and vis not in ("hidden", "collapse") and opaque(ni)}
+
+
 def _fill_positions(lines: list[Line]) -> None:
     """Lines whose node has no layout box (plain text, mostly) take the position of the line before them."""
     last: tuple[float | None, float | None] = (None, None)
@@ -227,7 +264,7 @@ class _FrameWalker:
     def __init__(self, nodes: list[dict], dom: dict[int, DomInfo], visible: str | None, page_url: str,
                  frame_url: str, previous: set[int] | None, lines: list[Line], elements: list[Element],
                  clickables: set[int] | None = None, overlay: int | None = None,
-                 tops: dict[int, tuple[float, float]] | None = None):
+                 tops: dict[int, tuple[float, float]] | None = None, drawn: set[int] | None = None):
         self.by_id = {n["nodeId"]: n for n in nodes}
         self.dom, self.visible, self.page_url, self.frame_url = dom, visible, page_url, frame_url
         self.previous, self.lines, self.elements = previous, lines, elements
@@ -236,6 +273,7 @@ class _FrameWalker:
         self.overlay_lines: list[Line] | None = None  # lines of the blocking dialog, hoisted by the caller
         self.in_control = 0  # >0 while inside a listed control: nothing nested becomes a "clickable"
         self.tops = tops or {}
+        self.drawn = drawn or set()  # nodes the layout snapshot shows painted (see drawn_nodes)
         self.text_pos: tuple[float, float] | None = None  # where the first text node of the pending line sits
         self.in_overlay = False
 
@@ -278,7 +316,7 @@ class _FrameWalker:
             return
         if role == "StaticText":
             t = fold(name)
-            if t and t not in inside and (self.visible is None or t in self.visible):
+            if t and t not in inside and self._shown(t, node):
                 self.text.append(name)
                 if self.text_pos is None:
                     self.text_pos = self._pos(node.get("backendDOMNodeId"))
@@ -340,6 +378,12 @@ class _FrameWalker:
         self.in_control -= 1
         self.flush()
 
+    def _shown(self, folded: str, node: dict) -> bool:
+        """Is this text on screen? Yes if the page-script probe saw it shown, or if the layout snapshot shows this very
+        node painted: the probe cannot enter closed shadow roots, and matching by text alone would lose a value that
+        also appears somewhere hidden (a collapsed tab's title)."""
+        return self.visible is None or folded in self.visible or node.get("backendDOMNodeId") in self.drawn
+
     def _pos(self, bid: int | None) -> tuple[float, float] | None:
         return self.tops.get(bid) if bid is not None else None
 
@@ -354,7 +398,7 @@ class _FrameWalker:
             n = stack.pop()
             if _val(n.get("role")) == "StaticText" and not n.get("ignored"):
                 t = norm(_val(n.get("name")))
-                if t and (self.visible is None or fold(t) in self.visible):
+                if t and self._shown(fold(t), n):
                     parts.append(t)
             stack.extend(reversed([self.by_id[c] for c in n.get("childIds") or [] if c in self.by_id]))
         return norm(" ".join(parts))
@@ -429,6 +473,36 @@ class _FrameWalker:
         )
         el.locators = candidates(el, attrs)
         return el
+
+
+# A date shown as an example or a format in a field's hint or placeholder ("Format: 12/31/2024", "dd/mm/yyyy").
+SNAPSHOT_STYLES = ["cursor", "opacity", "visibility"]  # computed styles the layout snapshot carries (order matters)
+_DATE_HINT = re.compile(r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b|\b(dd|mm)[/.-](dd|mm)[/.-]yy(yy)?\b", re.I)
+_FORM_WIDGETS = {"textbox", "searchbox", "combobox", "select", "spinbutton", "checkbox", "radio", "switch", "date"}
+
+
+def refine(lines: list[Line], elements: list[Element]) -> tuple[list[Line], list[Element]]:
+    """Two corrections that need the whole page:
+      * a clickable label right before the control it labels ("* Stage", then combobox "Stage") is the same thing
+        twice: only the control is kept;
+      * a text field named like a date whose hint or placeholder shows a date or a date format is a date picker,
+        even when it can be typed into (it is set through datepick, in the site's own format)."""
+    by_id = {e.id: e for e in elements}
+    order = [ln.element_id for ln in lines if ln.kind == "control" and ln.element_id in by_id]
+    drop: set[int] = set()
+    for a, b in zip(order, order[1:]):
+        ea, eb = by_id[a], by_id[b]
+        if ea.widget == "clickable" and eb.widget in _FORM_WIDGETS and \
+                fold(ea.name).lstrip("* ").strip() == fold(eb.name).strip():
+            drop.add(a)
+    for e in elements:
+        if e.widget == "textbox" and "date-picker" not in e.states and re.search(r"\bdate\b", e.name, re.I) and \
+                _DATE_HINT.search(" ".join([e.description] + [l.value for l in e.locators if l.kind == "placeholder"])):
+            e.states.append("date-picker")
+    if not drop:
+        return lines, elements
+    return ([ln for ln in lines if ln.element_id not in drop or ln.kind != "control"],
+            [e for e in elements if e.id not in drop])
 
 
 class Perceiver:
@@ -512,15 +586,15 @@ class Perceiver:
         except (PlaywrightError, KeyError):
             return {}
         
-    def _layout(self) -> tuple[set[int], dict[int, tuple[float, float]], float, tuple[float, float]]:
-        """(clickable node ids, node positions, scroll offset, viewport size) from one DOM snapshot."""
+    def _layout(self) -> tuple[set[int], dict[int, tuple[float, float]], set[int], float, tuple[float, float]]:
+        """(clickable node ids, node positions, painted node ids, scroll offset, viewport size) from one DOM snapshot."""
         try:
             w, h = self.page.evaluate("() => [innerWidth, innerHeight]")
-            snap = self.cdp.send("DOMSnapshot.captureSnapshot", {"computedStyles": ["cursor"]})
+            snap = self.cdp.send("DOMSnapshot.captureSnapshot", {"computedStyles": SNAPSHOT_STYLES})
             pos, scroll_y = layout_positions(snap)
-            return find_clickables(snap, w * h), pos, scroll_y, (float(w), float(h))
+            return find_clickables(snap, w * h), pos, drawn_nodes(snap), scroll_y, (float(w), float(h))
         except (PlaywrightError, KeyError, TypeError, ValueError):
-            return set(), {}, 0.0, (0.0, 0.0)  # perception degrades: accessibility-tree controls only, no windowing
+            return set(), {}, set(), 0.0, (0.0, 0.0)  # perception degrades: AX-tree controls only, no windowing
 
     def observe(self, settle: bool = True) -> Observation:
         settled = self.watcher.settle(cap_ms=3000) if settle else {"probe": None, "pending": 0}
@@ -528,10 +602,11 @@ class Perceiver:
         frames = self._capture()
         dom = index_dom(self._retry(lambda: self.cdp.send("DOM.getDocument", {"depth": -1, "pierce": True}))["root"])
         try:
-            visible = self._retry(lambda: self.page.evaluate(VISIBLE_JS))
+            shown_text = self._retry(lambda: self.page.evaluate(VISIBLE_JS))
         except PlaywrightError:
-            visible = None
-        (clickables, tops, scroll_y, (view_w, view_h)), (overlay, covers), invalid = self._layout(), self._overlay(), self._validation()
+            shown_text = None
+        (clickables, tops, drawn, scroll_y, (view_w, view_h)), (overlay, covers), invalid = \
+            self._layout(), self._overlay(), self._validation()
         lines: list[Line] = []
         elements: list[Element] = []
         hoisted: list[Line] = []
@@ -539,8 +614,9 @@ class Perceiver:
             start = len(lines)
             # Text from a cross-origin frame is not in `visible`, so it is not filtered there.
             same_origin = not frame["url"] or _origin(frame["url"]) == _origin(info["url"]) or frame["url"] == "about:srcdoc"
-            walker = _FrameWalker(frame["nodes"], dom, visible if same_origin else None, info["url"], frame["url"],
-                                  self._previous, lines, elements, clickables, overlay, tops)
+            walker = _FrameWalker(frame["nodes"], dom, shown_text if same_origin else None, info["url"], frame["url"],
+                                  self._previous, lines, elements, clickables, overlay, tops,
+                                  drawn=drawn)
             if frame["nodes"]:
                 walker.walk(frame["nodes"][0], "")
                 walker.flush()
@@ -551,13 +627,14 @@ class Perceiver:
             if frame["url"] and len(lines) > start:
                 lines.insert(start, Line(kind="frame", text=frame["url"]))
         if hoisted:  # a modal dialog covers the page: show it first, whatever its place in the document
-            lines[:0] = [Line(kind="overlay", text="dialog blocking the page: handle it first"), *hoisted,
+            lines[:0] = [Line(kind="overlay", text="dialog (on top of the page)"), *hoisted,
                          Line(kind="overlay", text="end of dialog")]
         for e in elements:  # fields the browser is complaining about right now
             if e.id in invalid:
                 e.validation = invalid[e.id]
                 if "invalid" not in e.states:
                     e.states.append("invalid")
+        lines, elements = refine(lines, elements)
         self._previous = {e.id for e in elements}
         nav_error = None
         if info["url"].startswith("chrome-error:"):

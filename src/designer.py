@@ -19,16 +19,20 @@ from pydantic import BaseModel, Field, field_validator
 from .actions import Step
 from .explorer import Event, ExplorationReport, PageInfo
 from .llm import LLMError
-from .text import clip, fold
+from .text import clip, fold, shows
 
 TestType = Literal["Positive", "Negative", "Boundary", "Validation", "Navigation", "E2E"]
 Priority = Literal["High", "Medium", "Low"]
-ExpectKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible"]
-AssertKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible", "field_value"]
+ExpectKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible", "field_shows"]
+AssertKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible", "field_shows",
+                     "field_value"]
+UI_ONLY = {"element_visible", "url_contains"}  # checks that show a screen was reached, not that anything was achieved
+_EXISTING = re.compile(r"\b(exists?|existing|already (created|saved|present))\b", re.I)
 Grounding = Literal["observed", "partial", "unverified"]
 
 MAX_CASES = 10
 MAX_EVIDENCE_CHARS = 24000
+MAX_PAGE_LINES = 60  # of each page's text in the prompt
 # Up to ten cases of structured JSON, plus whatever a reasoning model spends thinking first: far more than one
 # exploration decision needs. LLM_MAX_TOKENS still wins when it is set higher.
 DESIGN_MAX_TOKENS = 16000
@@ -46,6 +50,7 @@ class CaseStep(BaseModel):
     event: int | None = None  # E<n> of the exploration step this repeats, if any
     target: str = ""  # the control's name as the page shows it (for steps that were not recorded)
     value: str = ""  # data typed or chosen, if any
+    setup: bool = False  # creates something the case needs (an Account for an Opportunity), not the thing under test
     locator: str = ""  # filled by the code from the cited event: the verified Playwright locator
     recorded: Step | None = None  # filled by the code: the cited event's step, which a verifier can replay as is
 
@@ -61,7 +66,8 @@ class CaseStep(BaseModel):
 class Expectation(BaseModel):
     """A checkable claim about the outcome. `evidence` lists the events whose recorded changes show it."""
     kind: ExpectKind
-    value: str  # the text, URL fragment or control name to check
+    value: str  # the text, URL fragment or control name to check (for field_shows: the saved value)
+    label: str = ""  # field_shows only: the field label the value is shown under ("Company")
     evidence: list[int] = Field(default_factory=list)
     observed: bool = False  # set by the code: the value was found in the recorded evidence
 
@@ -176,10 +182,20 @@ never design a case that expects such a failure.
 - Expected outcomes must be checkable. Give each as {"kind", "value", "evidence"}: kind is one of text_visible, \
 text_gone, field_error, alert, url_contains, element_visible; value is the exact text, URL fragment or control name as \
 recorded (for field_error and alert: the message text itself, never just the field's name); evidence lists the event \
-numbers whose changes show it. If you expect something the evidence does not show \
+numbers whose changes show it. field_shows checks a saved value as the record or detail page displays it, using \
+the label that page shows (from its "reads:" lines, not the form's field names): {"kind": "field_shows", \
+"label": "Company", "value": "TechNova Solutions"}. If you expect something the evidence does not show \
 (for example a validation message nobody triggered), still write it, with an empty evidence list: it will be checked.
 - Each case runs on its own, in a fresh browser opened at the application URL: list every step needed to get from \
-there to what it checks (dismissing a notice, opening a tab, filling the fields before the one under test).
+there to what it checks (dismissing a notice, opening a tab, filling the fields before the one under test). If it needs \
+something to exist first (an account, a customer), create it in its own first steps marked "setup": true; never rely \
+on another case or on data that may not be there.
+- Test business outcomes, not clicks. Not "open the form, enter details, click Save", but "create the record with valid \
+details, check it was saved, and check the saved values match what was entered" (field_shows for each key field, and \
+the list or search it should appear in). Negative cases check that nothing was saved and the right message was shown.
+- Required fields are the ones the application showed as required or complained about: never assume a field is \
+mandatory. Use realistic test data (made-up people and companies, example.com emails) that a person could re-enter, \
+and steps another tester can follow without guessing.
 - 5 to 10 cases, most important first: the main end-to-end flow, then validation and negative cases on the same \
 screens (empty required field, invalid or out-of-range value, past date, same value where two must differ), then \
 boundary and navigation cases. No duplicates or trivial variations. Stay inside the requirement.
@@ -192,9 +208,10 @@ REPLY with JSON only:
 {"cases": [{"title": "...", "module": "page or area", "covers": [1, 2], "scenario": "requirement aspect validated",
   "type": "Positive|Negative|Boundary|Validation|Navigation|E2E", "priority": "High|Medium|Low",
   "priority_reason": "...", "preconditions": ["..."], "test_data": {"field": "value"},
-  "steps": [{"description": "...", "event": 3, "target": "", "value": ""}],
+  "steps": [{"description": "...", "event": 3, "target": "", "value": "", "setup": false}],
   "expected_result": "in words",
-  "expected": [{"kind": "field_error", "value": "...", "evidence": [5]}]}],
+  "expected": [{"kind": "field_shows", "label": "...", "value": "...", "evidence": [7]},
+               {"kind": "field_error", "value": "...", "evidence": [5]}]}],
  "unsupported": [{"point": 4, "reason": "..."}]}"""
 
 
@@ -239,6 +256,8 @@ def _page_block(p: PageInfo) -> str:
         out.append("  field " + " ".join(bits))
     if p.buttons:
         out.append("  buttons: " + ", ".join(f'"{clip(b, 60)}"' for b in p.buttons))
+    if p.texts:  # what the page said, in order: labels and the values saved under them
+        out.append("  reads: " + " | ".join(clip(t, 60) for t in p.texts[:MAX_PAGE_LINES]))
     return "\n".join(out)
 
 
@@ -336,6 +355,14 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
         problems.append(f'step {i} uses "{clip(step.target or step.description, 60)}", which was not seen on the page')
 
     for x in case.expected:
+        if x.kind == "field_shows":
+            page = next((p for p in ev.pages if shows(p.texts, x.label, x.value)), None)
+            x.evidence, x.observed = [], page is not None
+            if page is not None:
+                support.append(f'"{clip(x.label, 30)}" shows "{clip(x.value, 40)}" on {clip(page.url, 80)}')
+            else:
+                problems.append(f'"{clip(x.label, 30)}" showing "{clip(x.value, 40)}" was never observed')
+            continue
         cited = [ev.events[n] for n in x.evidence if n in ev.events]
         hit = next((e for e in cited if _contains(ev.texts(x.kind, e), x.value)), None)
         if hit is None:  # the model may cite the wrong step, or none: look through all of them
@@ -351,6 +378,14 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
             problems.append(f'expected {x.kind} "{clip(x.value, 60)}" was never observed')
     if not case.expected:
         problems.append("no checkable expected outcome")
+    # the reference bar: a positive or end-to-end case proves a result, and every case can run on its own
+    outcome_ok = not (case.type in ("Positive", "E2E") and case.expected and {x.kind for x in case.expected} <= UI_ONLY)
+    if not outcome_ok:
+        problems.append("no business outcome asserted: only that a screen was reached")
+    needs = [p for p in case.preconditions if _EXISTING.search(p)]
+    independent = not needs or any(s.setup for s in case.steps)
+    if not independent:
+        problems.append(f'precondition "{clip(needs[0], 60)}" is not created by the case\'s own setup steps')
 
     bad = [p for p in case.covers if not 1 <= p <= n_points]
     if bad:
@@ -358,7 +393,7 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
         case.covers = [p for p in case.covers if 1 <= p <= n_points]
 
     observed = [x for x in case.expected if x.observed]
-    if steps_ok and case.expected and len(observed) == len(case.expected):
+    if steps_ok and outcome_ok and independent and case.expected and len(observed) == len(case.expected):
         case.grounding = "observed"
     elif observed or any(s.event is not None for s in case.steps):
         case.grounding = "partial"
@@ -370,7 +405,7 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
 
 def _key(case: TestCase) -> tuple:
     steps = tuple((s.event, fold(s.target), fold(s.value)) for s in case.steps)
-    checks = tuple(sorted((x.kind, fold(x.value)) for x in case.expected))
+    checks = tuple(sorted((x.kind, fold(x.label), fold(x.value)) for x in case.expected))
     return steps, checks
 
 

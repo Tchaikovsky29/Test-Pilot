@@ -16,6 +16,7 @@ The model never writes code. A case ends "verified", "unconfirmed" (it ran, but 
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -32,10 +33,12 @@ from .llm import LLMError
 from .locators import ensure_locator
 from .models import Element, Locator, Observation
 from .policy import Policy
-from .text import clip, fold
+from .text import clip, fold, shows
 
 CaseStatus = Literal["verified", "unconfirmed", "failed", "blocked"]
-MAX_AGENT_ACTIONS = 6  # per step: open a dropdown, type, pick the option, ... but not wander off
+_DUPLICATE = re.compile(r"\bduplicate", re.I)
+MAX_AGENT_ACTIONS = 6
+SETTLE_AGAIN_MS = 1500  # extra wait before re-reading a page whose saved values had not appeared  # per step: open a dropdown, type, pick the option, ... but not wander off
 DEFAULT_CASE_SECONDS = 180.0
 SKIPPED_KINDS = ("scroll", "wait")  # exploration moves, not test steps: locators do not need the element on screen
 
@@ -49,6 +52,7 @@ class Assertion(BaseModel):
     locator: Locator | None = None  # the field (field_error) or control (element_visible) it is about
     frame_url: str = ""
     native: bool = False  # a field_error from the browser's own validation bubble: not page text
+    label: str = ""  # field_shows: the label the saved value is shown under
 
 
 class ExpectationResult(BaseModel):
@@ -75,6 +79,7 @@ class VerifiedCase(BaseModel):
     expectations: list[ExpectationResult] = Field(default_factory=list)
     definition: list[Step] = Field(default_factory=list)  # the steps that worked: what the compiler writes
     assertions: list[Assertion] = Field(default_factory=list)  # the checks that held
+    notices: list[str] = Field(default_factory=list)  # what the site warned about without failing the case (duplicates)
     llm_calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -172,6 +177,7 @@ class _Run:
         self.page_text = actor.look()
         self.step_changes: list[Changes] = []  # what each action of the current step changed
         self.dialogs: list[str] = []  # native alert/confirm messages, reported in action messages
+        self.notices: list[str] = []  # warnings worth reporting that do not fail the case
 
     def do(self, action: Action) -> ActionResult:
         r = self.actor.act(action)
@@ -179,6 +185,10 @@ class _Run:
             self.dialogs.append(r.message[r.message.index("[dialog "):])
         self.page_text = self.actor.look()
         self.step_changes.append(self.actor.changes)
+        ch = self.actor.changes
+        for t in ch.alerts + ch.appeared:  # a re-run with the same data: the site's own duplicate warning
+            if _DUPLICATE.search(t) and t not in self.notices:
+                self.notices.append(clip(t, 200))
         return r
 
     def last_changes(self) -> Changes:
@@ -226,7 +236,9 @@ def _replay(run: _Run, rec: Step, value: str) -> ActionResult | None:
     if rec.kind == "click":
         return run.do(Click(id=e.id))
     if rec.kind == "type":
-        return run.do(Type(id=e.id, text=value, keys=rec.keys, submit=rec.submit))
+        # key presses or not is decided from the field as it is now (a suggestion box gets them): recordings made
+        # before that rule typed every box key by key, which could lose the last key
+        return run.do(Type(id=e.id, text=value, submit=rec.submit))
     if rec.kind == "select":
         return run.do(Select(id=e.id, option=value))
     return None
@@ -273,6 +285,7 @@ class _Seen:
     def __init__(self, run: _Run):
         self.run, self.obs, self.last = run, run.actor.obs, run.last_changes()
         self.page = [ln.text for ln in self.obs.lines] + [e.display_name for e in self.obs.elements]
+        self.readable = self.obs.readable()
         self.errors = field_errors(self.obs)
         self.alerts = [ln.text for ln in self.obs.lines if ln.kind == "alert"] + self.last.alerts + run.dialogs
         # a page-level message after a step that stayed put: an alert region, a native dialog, or a plain toast
@@ -329,6 +342,16 @@ def _field_error(s: _Seen, x: Expectation) -> Outcome:
     return "not_seen", shown, None
 
 
+def _field_shows(s: _Seen, x: Expectation) -> Outcome:
+    """A saved value under its label on the page now (a record page): the persisted data, not just a message."""
+    if shows(s.readable, x.label, x.value):
+        return "confirmed", "", Assertion(kind=x.kind, label=x.label, value=x.value)
+    lab = fold(x.label).strip().rstrip(":")
+    at = next((i for i, t in enumerate(s.readable) if fold(t).strip().rstrip(":") == lab), None)
+    shown = " | ".join(s.readable[at + 1:at + 3]) if at is not None else f'no "{x.label}" on the page'
+    return "not_seen", clip(shown, 200), None
+
+
 def _alert(s: _Seen, x: Expectation) -> Outcome:
     if _contains(s.alerts, x.value):
         return "confirmed", "", Assertion(kind=x.kind, value=x.value)
@@ -339,19 +362,27 @@ def _alert(s: _Seen, x: Expectation) -> Outcome:
 
 
 _CHECKS = {"text_visible": _text_visible, "text_gone": _text_gone, "url_contains": _url_contains,
-           "element_visible": _element_visible, "field_error": _field_error, "alert": _alert}
+           "element_visible": _element_visible, "field_error": _field_error, "alert": _alert,
+           "field_shows": _field_shows}
 
 
 def check(run: _Run, expected: list[Expectation]) -> tuple[list[ExpectationResult], list[Assertion]]:
     """Each expected outcome against the page now and what the last step changed. An outcome the designer only
     guessed (never observed) that is contradicted by a concrete message is corrected to what the page said."""
     seen = _Seen(run)
+    if any(x.kind == "field_shows" and _field_shows(seen, x)[0] != "confirmed" for x in expected):
+        # a record page fills its values in after it appears: give it a moment and read it again, once
+        run.actor.session.watcher.settle(cap_ms=3000)
+        run.actor.session.page.wait_for_timeout(SETTLE_AGAIN_MS)
+        run.page_text = run.actor.look()
+        seen = _Seen(run)
     results, asserts = [], []
     for x in expected:
         status, actual, a = _CHECKS[x.kind](seen, x)
         if status == "not_seen" and not actual and (seen.last.appeared or seen.last.alerts or seen.last.errors):
             actual = clip("; ".join((seen.last.alerts + seen.last.errors + seen.last.appeared)[:4]), 300)
-        results.append(ExpectationResult(kind=x.kind, expected=x.value, status=status, actual=actual))
+        expected = f"{x.label}: {x.value}" if x.kind == "field_shows" else x.value
+        results.append(ExpectationResult(kind=x.kind, expected=expected, status=status, actual=actual))
         if a is not None and not any((b.kind, b.value, b.locator) == (a.kind, a.value, a.locator) for b in asserts):
             asserts.append(a)  # several guesses can resolve to the same message: check it once
     return results, asserts
@@ -365,8 +396,11 @@ def verify_case(case: TestCase, url: str, llm, browser: BrowserConfig, *, max_se
     today = today or date.today().isoformat()
     out = VerifiedCase(case=case, status="failed")
 
+    run: _Run | None = None
+
     def finish(status: CaseStatus, reason: str = "") -> VerifiedCase:
         out.status, out.reason = status, reason
+        out.notices = list(run.notices) if run is not None else []
         out.elapsed_s = round(time.monotonic() - t0, 1)
         u = getattr(llm, "usage", None)
         if u is not None:
@@ -380,6 +414,7 @@ def verify_case(case: TestCase, url: str, llm, browser: BrowserConfig, *, max_se
         except NavigationError as e:
             return finish("blocked", str(e))
         actor = Actor(session, Policy(start_url=url, allow_external_links=True))
+        actor.policy.allow_site_of(session.page.url)  # where the start URL redirected to
         run = _Run(actor)
         for n, step in enumerate(case.steps, 1):
             run.step_changes = []

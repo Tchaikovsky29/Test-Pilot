@@ -115,6 +115,25 @@ class ActionResult(BaseModel):
         return self.status == "ok"
 
 
+def _visible_choice(root, e: Element, loc: Locator) -> Locator:
+    """The chosen locator's one match may be a hidden copy (an app that keeps earlier screens rendered in the
+    background). Then prefer another of the element's locators narrowed to visible elements, if it finds exactly one."""
+    try:
+        if resolve(root, loc).first.is_visible():
+            return loc
+        for cand in e.locators:
+            if cand.nth is not None:
+                continue
+            narrowed = cand.model_copy(update={"visible": True, "matches": None})
+            if resolve(root, narrowed).count() == 1:
+                narrowed.matches = 1
+                e.locators.append(narrowed)
+                return narrowed
+    except PlaywrightError:
+        pass
+    return loc
+
+
 def _fail(msg: str) -> ActionResult:
     return ActionResult(status="failed", message=msg)
 
@@ -205,7 +224,9 @@ class Actor:
                 last = e
                 loc = ensure_locator(self.session.page, e, self.obs.elements)
                 if loc is not None:
-                    return e, loc, resolve(root_for(self.session.page, e.frame_url), loc)
+                    root = root_for(self.session.page, e.frame_url)
+                    loc = _visible_choice(root, e, loc)
+                    return e, loc, resolve(root, loc)
                 if not e.locators:
                     break  # nothing to find it by: looking again will not help
 
@@ -293,7 +314,7 @@ class Actor:
             return _fail(f"{self._label(e)} is a native date field: type the date as YYYY-MM-DD")
         before, t0 = self.session.snapshot(), now_ms()
         if "date-picker" in e.states and e.input_type != "date":  # native date inputs take ISO via fill, below
-            picked = pick_date(target, a.text, timeout_ms=self.click_timeout_ms)
+            picked = pick_date(target, a.text, timeout_ms=self.click_timeout_ms, hint=e.description)
             if not picked.ok:
                 return _fail(f"could not set {self._label(e)} to {a.text}: {picked.message}")
             try:
@@ -304,13 +325,22 @@ class Actor:
             return self._done(f"set {self._label(e)} to {a.text} ({picked.message})" + (" and pressed Enter" if a.submit else ""),
                               before, t0, Step(kind="type", locator=loc, frame_url=e.frame_url, value=a.text,
                                                date_picker=True, submit=a.submit, element_name=e.name, widget=e.widget))
-        use_keys = a.keys or e.widget in {"textbox", "searchbox", "combobox"}
+        # Key presses only where a page reacts to them (suggestion boxes); elsewhere set the value at once: typing key
+        # by key into a plain field can lose the last key when the next action moves focus (Lightning did).
+        use_keys = a.keys or "autocomplete" in e.states or e.widget in {"searchbox", "combobox"}
         try:
             if use_keys:
                 target.clear(timeout=self.click_timeout_ms)
                 target.press_sequentially(a.text, delay=40, timeout=self.click_timeout_ms)
             else:
                 target.fill(a.text, timeout=self.click_timeout_ms)
+                held = target.input_value(timeout=self.click_timeout_ms)
+                if held != a.text:  # the page dropped or reformatted part of it: once more, then say so
+                    target.fill(a.text, timeout=self.click_timeout_ms)
+                    held = target.input_value(timeout=self.click_timeout_ms)
+                    if held != a.text and e.input_type not in ("number", "tel", "email"):
+                        return _fail(f"typed {quote(clip(a.text, 60))} into {self._label(e)} but it holds "
+                                     f"{quote(clip(held, 60))}")
             if a.submit:
                 target.press("Enter", timeout=self.click_timeout_ms)
             if use_keys:

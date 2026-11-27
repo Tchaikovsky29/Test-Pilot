@@ -59,6 +59,13 @@ class Policy:
         if not self.allowed_hosts:
             self.allowed_hosts = {_host(self.start_url)}
 
+    def allow_site_of(self, url: str) -> None:
+        """The start URL may redirect to another host of the same application (my.salesforce.com ->
+        lightning.force.com): where the app actually opened is part of the site too."""
+        h = _host(url)
+        if h and not url.startswith(("about:", "chrome-error:", "data:")):
+            self.allowed_hosts.add(h)
+
     def host_allowed(self, url: str) -> bool:
         if url.startswith(("about:", "chrome-error:", "data:")):
             return True

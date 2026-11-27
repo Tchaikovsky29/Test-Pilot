@@ -79,6 +79,7 @@ Copy `.env.example` to `.env`. Keep secrets out of source control.
 ## Command line
 
 ```bash
+test-pilot login <url> [--session PATH]
 test-pilot observe <url> [--headed] [--cdp-url URL] [--max-chars N] [--full] [--json] [--locators]
 test-pilot llm [--provider gemini|groq|openai|openrouter] [--model MODEL] [--models]
 test-pilot explore <url> "<requirement>" [--provider PROVIDER] [--model MODEL] [--max-steps N] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL] [--quiet]
@@ -86,10 +87,11 @@ test-pilot design <report.json> [--provider PROVIDER] [--model MODEL] [--out PAT
 test-pilot verify <cases.json> [--case TC-NN] [-c N] [--provider PROVIDER] [--model MODEL] [--max-seconds N] [--out PATH] [--headed] [--cdp-url URL]
 ```
 
+- `login` opens a browser at the URL so **you** can log in, including any email or authenticator code. When you press Enter, only the browser session (cookies and storage) is saved, to `.test-pilot/sessions/<host>.json`, which is gitignored. The tool never sees or stores a password, and its policy never types one. `observe`, `explore` and `verify` load the saved session for the site automatically, or take `--session PATH`. If the site shows a login form again, they stop and ask you to log in again. Use a dedicated test user in a sandbox or dev org.
 - `observe` prints the text the model would receive. `--locators` verifies one Playwright locator per control.
 - `llm` validates the provider configuration with a tiny structured call. `--models` lists models accessible to the configured key.
 - `explore` runs the bounded LLM/browser loop and writes an `ExplorationReport` JSON file under `artifacts/` by default.
-- `design` turns an exploration report into 5–10 structured test cases (`<report>.cases.json`) with one model call, then checks each case against the recorded evidence in code. A step must repeat a successful recorded step or name a control that was seen. An expected outcome counts as observed only if its text appears in what the browser recorded. Each case is marked `observed`, `partial` or `unverified` with the reasons, and requirement points no case covers are listed as gaps.
+- `design` turns an exploration report into 5–10 structured test cases. Cases must prove a business outcome: a positive case that only checks a screen was reached is flagged. A saved record is checked with `field_shows` (the value shown under its label on the record page). A case that needs data to exist creates it in its own `setup` steps, so every case runs on its own. It writes `<report>.cases.json` with one model call, then checks each case against the recorded evidence in code. A step must repeat a successful recorded step or name a control that was seen. An expected outcome counts as observed only if its text appears in what the browser recorded. Each case is marked `observed`, `partial` or `unverified` with the reasons, and requirement points no case covers are listed as gaps.
 - `verify` runs each test case in its own fresh browser context, one at a time by default. `-c N` runs N cases at once (watch free-tier rate limits), and `--case TC-NN` runs just that case. It writes `<report>.verified.json`:
   - **Recorded steps** are replayed without the model.
   - **Other steps** are carried out by the model through the same safety policy as the explorer, in at most 6 actions per step.
@@ -119,7 +121,7 @@ One line per control, in page order. `[id]` is Chrome's backend node id and is v
 
 ```
 [state] PHPTRAVELS | https://phptravels.net/
---- dialog blocking the page: handle it first ---
+--- dialog (on top of the page) ---
 ## Testing Environment Only - NO Real Payments
 This is a testing platform for development purposes. Do not use real payment methods…
 [89] button "I Understand & Continue"

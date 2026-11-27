@@ -53,7 +53,7 @@ def test_a_dialog_over_a_backdrop_is_all_that_is_listed(portal):
     assert obs.blocked and obs.modal                                   # the backdrop stops clicks reaching the page
     text = render(obs)
     lines = text.splitlines()
-    assert lines[1].startswith("--- dialog blocking the page")       # although it is last in the document
+    assert lines[1].startswith("--- dialog (on top of the page)")       # although it is last in the document
     assert "I Understand" in text and text.count("--- end of dialog ---") == 1
     assert "Travel The Way You Love" not in text and "page behind the dialog is hidden" in text
 
@@ -62,7 +62,7 @@ def test_dialog_gone_after_dismissal(portal):
     portal.observe()
     portal.page.click("#ok")
     obs = portal.observe()
-    assert not obs.blocked and "dialog blocking" not in render(obs)
+    assert not obs.blocked and "--- dialog" not in render(obs)
 
 
 def test_card_text_is_not_repeated(portal):

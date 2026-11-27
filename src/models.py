@@ -85,6 +85,8 @@ class Line(BaseModel):
 
 
 _VARIABLE = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f-]{27}")
+INPUT_WIDGETS = {"textbox", "searchbox", "combobox", "select", "spinbutton", "date", "checkbox", "radio", "switch",
+                 "slider", "file"}  # controls that hold what the user enters
 _SIG_SKIP = {"link", "option", "tab", "menuitem", "treeitem"}
 
 
@@ -119,6 +121,20 @@ class Observation(BaseModel):
             elif in_dialog and ln.kind == "control" and ln.element_id is not None:
                 ids.add(ln.element_id)
         return ids
+
+    def readable(self, max_len: int = 120) -> list[str]:
+        """What the page displays, in reading order: headings, text, links and buttons. A record page reads "Company",
+        "TechNova Solutions", "Email", "john@example.com", ...: a label, then the saved value. Form inputs are left
+        out: what a text box holds is what was typed, not what was saved (that is a field_value check)."""
+        out: list[str] = []
+        by_id = self.by_id
+        for ln in self.lines:
+            if ln.kind in ("heading", "text", "alert") and ln.text:
+                out.append(ln.text[:max_len])
+            elif ln.kind == "control" and ln.element_id in by_id and by_id[ln.element_id].widget not in INPUT_WIDGETS:
+                e = by_id[ln.element_id]
+                out += [t[:max_len] for t in (e.display_name, e.value) if t]
+        return out
 
     def signature(self) -> str:
         """A coarse page-type fingerprint: URL path pattern + form-ish controls + headings, with numbers erased.

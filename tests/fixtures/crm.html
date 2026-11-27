@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Leads | CRM</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  main { padding: 16px; }
+  #shade { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 40; display: none; align-items: center; justify-content: center; }
+  #shade.open { display: flex; }
+  #form { background: #fff; padding: 16px; width: 420px; }
+  .row { margin: 6px 0; }
+  .err { color: #b00; font-size: 12px; }
+  #toast { position: fixed; top: 8px; right: 8px; background: #2e844a; color: #fff; padding: 8px; }
+  dl div { display: flex; gap: 12px; } dt { width: 120px; color: #555; }
+</style></head>
+<body>
+<!-- A small CRM shaped like a Lightning org, without being one:
+     a Leads list; "New" opens a form in a pop-up over a backdrop (Last Name and Company required);
+     Save with a field missing -> "We hit a snag." banner + a message on the field;
+     Save with everything -> a record page with a toast and the saved values under their labels;
+     the same email saved twice -> a duplicate warning on the record page.
+     Records live in localStorage, so a fresh browser starts empty. -->
+<main id="main"></main>
+<div id="shade"><div id="form" role="dialog" aria-modal="true" aria-labelledby="ft">
+  <h2 id="ft">New Lead</h2>
+  <div id="snag" role="alert" hidden><strong>We hit a snag.</strong> Review the following fields: <span id="snaglist"></span></div>
+  <div class="row"><label for="fn">First Name</label> <input id="fn"></div>
+  <div class="row"><label for="ln">* Last Name</label> <input id="ln" aria-required="true" aria-describedby="ln-err"> <span class="err" id="ln-err"></span></div>
+  <div class="row"><label for="co">* Company</label> <input id="co" aria-required="true" aria-describedby="co-err"> <span class="err" id="co-err"></span></div>
+  <div class="row"><label for="em">Email</label> <input id="em" type="email"></div>
+  <div class="row"><label for="ph">Phone</label> <input id="ph"></div>
+  <button type="button" id="cancel">Cancel</button> <button type="button" id="save">Save</button>
+</div></div>
+<script>
+  const q = new URLSearchParams(location.search), main = document.getElementById("main");
+  const leads = JSON.parse(localStorage.getItem("leads") || "[]");
+  const store = () => localStorage.setItem("leads", JSON.stringify(leads));
+  const field = (label, value) => `<div><dt>${label}</dt><dd>${value || ""}</dd></div>`;
+
+  if (q.get("lead")) {
+    const l = leads[+q.get("lead")];
+    const dup = leads.filter(x => x.email && x.email === l.email).length > 1;
+    main.innerHTML = `<p><a href="crm.html">Leads</a></p><h1>${l.first} ${l.last}</h1>
+      ${q.get("new") ? `<div id="toast" role="status">Lead "${l.first} ${l.last}" was created.</div>` : ""}
+      ${dup ? '<div role="alert">This record looks like a duplicate. View duplicates.</div>' : ""}
+      <dl>${field("Name", `${l.first} ${l.last}`)}${field("Company", l.company)}${field("Email", l.email)}${field("Phone", l.phone)}</dl>`;
+  } else {
+    main.innerHTML = `<h1>Leads</h1><button type="button" id="new">New</button>
+      <table><tr><th>Name</th><th>Company</th></tr>${leads.map((l, i) =>
+        `<tr><td><a href="crm.html?lead=${i}">${l.first} ${l.last}</a></td><td>${l.company}</td></tr>`).join("")}</table>`;
+    document.getElementById("new").onclick = () => document.getElementById("shade").classList.add("open");
+  }
+  document.getElementById("cancel").onclick = () => document.getElementById("shade").classList.remove("open");
+  document.getElementById("save").onclick = () => {
+    const v = id => document.getElementById(id).value.trim();
+    const missing = [["ln", "Last Name"], ["co", "Company"]].filter(([id]) => !v(id));
+    for (const [id] of [["ln"], ["co"]]) {
+      const bad = missing.some(([m]) => m === id);
+      document.getElementById(id).setAttribute("aria-invalid", bad ? "true" : "false");
+      document.getElementById(id + "-err").textContent = bad ? "Complete this field." : "";
+    }
+    if (missing.length) {
+      document.getElementById("snaglist").textContent = missing.map(m => m[1]).join(", ");
+      document.getElementById("snag").hidden = false;
+      return;
+    }
+    leads.push({first: v("fn"), last: v("ln"), company: v("co"), email: v("em"), phone: v("ph")});
+    store();
+    location.href = `crm.html?lead=${leads.length - 1}&new=1`;
+  };
+</script>
+</body></html>

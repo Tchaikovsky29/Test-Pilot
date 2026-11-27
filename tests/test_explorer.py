@@ -75,7 +75,7 @@ def test_valid_then_invalid_flow_is_recorded_with_evidence(run):
     assert empty.status == "ok" and empty.changes.errors and "City:" in empty.changes.errors[0]    # the bad-input probe
     assert "Searching" in valid.changes.appeared and "Looking for trips to Pune" in valid.changes.appeared
     assert r.code == ['page.get_by_role("button", name="Search", exact=True).click()',
-                      'page.get_by_role("textbox", name="City", exact=True).press_sequentially("Pune")',
+                      'page.get_by_role("textbox", name="City", exact=True).fill("Pune")',  # a plain field: set at once
                       'page.get_by_role("button", name="Search", exact=True).click()']
     steps = [e.step for e in r.events if e.step]                     # each event keeps its replayable step
     assert len(steps) == 3 and steps[1].value == "Pune"
@@ -274,8 +274,8 @@ def test_pushing_a_second_time_at_a_person_only_step_ends_the_run(run):
 def test_a_blocking_dialog_is_handled_first(run):
     llm = Script(click("I Understand & Continue"), DONE)
     r = run(llm, path="/portal.html")
-    assert "dialog blocking the page" in llm.prompts[0][1]["content"]
-    assert r.events[0].status == "ok" and "dialog blocking" not in llm.prompts[1][1]["content"]
+    assert "--- dialog (on top of the page)" in llm.prompts[0][1]["content"]
+    assert r.events[0].status == "ok" and "--- dialog" not in llm.prompts[1][1]["content"]
 
 
 def test_unreachable_site_gives_a_clear_report(session):

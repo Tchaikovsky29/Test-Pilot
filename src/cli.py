@@ -1,4 +1,5 @@
-"""test-pilot observe <url>             : print the page exactly as the model will see it (no LLM involved).
+"""test-pilot login <url>               : log in yourself in a browser; the session (never the password) is saved.
+test-pilot observe <url>             : print the page exactly as the model will see it (no LLM involved).
 test-pilot llm                         : check the LLM configuration with one tiny call.
 test-pilot explore <url> "<requirement>": explore the app with the model and write an evidence report.
 test-pilot design <report.json>         : design structured test cases from an exploration report.
@@ -15,7 +16,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
-from .browser import BrowserConfig, BrowserSession, NavigationError
+from .browser import BrowserConfig, BrowserSession, NavigationError, validate_url
+from .sessions import find_session, session_path
 from .designer import DesignResult, design
 from .verifier import DEFAULT_CASE_SECONDS, VerifiedCase, verify
 from .explorer import Event, ExplorationReport, call_budget, explore
@@ -30,10 +32,47 @@ class _Ping(BaseModel):
     say: str = ""
 
 
-def _observe(args) -> int:
-    cfg = BrowserConfig(headless=not args.headed)
-    if args.cdp_url:
+def browser_config(args, url: str) -> BrowserConfig:
+    """Headed or not, a remote browser if asked, and the saved session for the site if there is one."""
+    cfg = BrowserConfig(headless=not getattr(args, "headed", False))
+    if getattr(args, "cdp_url", None):
         cfg.cdp_url = args.cdp_url
+    cfg.storage_state = find_session(url, getattr(args, "session", None))
+    if cfg.storage_state:
+        print(f"using the saved session {cfg.storage_state}", file=sys.stderr)
+    return cfg
+
+
+def _login(args) -> int:
+    try:
+        url = validate_url(args.url)
+    except NavigationError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    path = args.session or str(session_path(url))
+    with BrowserSession(BrowserConfig(headless=False)) as s:
+        try:
+            s.goto(url)
+        except NavigationError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print("Log in in the browser window (including any verification code), wait until the app's home page\n"
+              "has loaded, then press Enter here. Only the browser session is saved, never your password.")
+        try:
+            input()
+        except EOFError:
+            print("error: no terminal to confirm the login from", file=sys.stderr)
+            return 1
+        if s.login_form_shown():
+            print("error: the page still shows a login form; nothing was saved", file=sys.stderr)
+            return 1
+        s.save_state(path)
+    print(f"session saved to {path} (keep it private: it logs in as you until the site ends the session)")
+    return 0
+
+
+def _observe(args) -> int:
+    cfg = browser_config(args, args.url)
     try:
         with BrowserSession(cfg) as s:
             s.goto(args.url)
@@ -90,9 +129,7 @@ def _explore(args) -> int:
     except LLMError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    bcfg = BrowserConfig(headless=not args.headed)
-    if args.cdp_url:
-        bcfg.cdp_url = args.cdp_url
+    bcfg = browser_config(args, args.url)
     print(f"exploring {args.url} with {cfg.provider.name}/{cfg.model}\nrequirement: {args.requirement}\n")
     with BrowserSession(bcfg) as s:
         report = explore(s, llm, args.url, args.requirement, max_steps=args.max_steps, max_seconds=args.max_seconds,
@@ -166,6 +203,8 @@ def _print_verified(v: VerifiedCase) -> None:
     print(f"{v.case.id} {v.status.upper():<11} {clip(v.case.title, 70)}  ({v.elapsed_s}s)")
     if v.reason:
         print(f"     {v.reason}")
+    for n in v.notices:
+        print(f"     notice: {n}")
 
 
 def _verify(args) -> int:
@@ -195,9 +234,7 @@ def _verify(args) -> int:
         per_case = cfg.max_calls if cfg.max_calls is not None else len(case.steps) * 7 + 4
         return LLM(dataclasses.replace(cfg, max_calls=per_case))
 
-    bcfg = BrowserConfig(headless=not args.headed)
-    if args.cdp_url:
-        bcfg.cdp_url = args.cdp_url
+    bcfg = browser_config(args, cases.url)
     print(f"verifying {len(cases.cases)} case(s) on {cases.url} with {cfg.provider.name}/{cfg.model}, "
           f"{args.concurrency} at a time\n")
     result = verify(cases, llm_for, bcfg, concurrency=args.concurrency, max_seconds=args.max_seconds,
@@ -267,9 +304,16 @@ def main(argv: list[str] | None = None) -> int:
     ve.add_argument("--headed", action="store_true", help="show the browser windows (one per running case)")
     ve.add_argument("--cdp-url", help="connect to a remote Chromium (each case gets its own context)")
 
+    lg = sub.add_parser("login", help="log in yourself in a browser and save the session (never the password)")
+    lg.add_argument("url")
+    lg.add_argument("--session", help="where to save it (default: .test-pilot/sessions/<host>.json)")
+
+    for p in (ob, ex, ve):
+        p.add_argument("--session", help="a saved session file (default: the one saved for the site, if any)")
+
     load_dotenv()
     args = ap.parse_args(argv)
-    return {"observe": _observe, "llm": _llm, "explore": _explore, "design": _design,
+    return {"login": _login, "observe": _observe, "llm": _llm, "explore": _explore, "design": _design,
             "verify": _verify}[args.cmd](args)
 
 

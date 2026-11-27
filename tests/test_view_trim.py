@@ -23,7 +23,7 @@ def obs(lines, elements, **kw):
 
 def dialog(elements_in, prose="Please read this"):
     ok = el(900, name="OK")
-    return [Line(kind="overlay", text="dialog blocking the page: handle it first"), Line(kind="heading", text="Notice"),
+    return [Line(kind="overlay", text="dialog (on top of the page)"), Line(kind="heading", text="Notice"),
             Line(kind="text", text=prose), ctl(ok), Line(kind="overlay", text="end of dialog")], [ok]
 
 
@@ -47,7 +47,7 @@ def test_soft_overlay_keeps_the_page():  # a fixed layer that is not role=dialog
 
 def test_modal_without_a_control_keeps_the_page():  # hiding the page here could strand the model
     page = [el(1, name="Search")]
-    lines = [Line(kind="overlay", text="dialog blocking the page: handle it first"), Line(kind="text", text="Loading…"),
+    lines = [Line(kind="overlay", text="dialog (on top of the page)"), Line(kind="text", text="Loading…"),
              Line(kind="overlay", text="end of dialog"), ctl(page[0], y=100)]
     assert '"Search"' in render(obs(lines, page, blocked=True, modal=True))
 
@@ -184,3 +184,18 @@ if __name__ == "__main__":
         f()
         print("ok  ", n)
     print(f"{len(tests)} passed")
+
+def test_a_clickable_label_before_its_control_is_dropped_and_date_hints_mark_a_picker():
+    from test_pilot.perceive import refine
+    from test_pilot.models import Locator
+    label = el(1, widget="clickable", name="* Stage")
+    stage = el(2, widget="combobox", name="Stage")
+    other = el(3, widget="clickable", name="Help")
+    close = el(4, widget="textbox", name="Close Date", description="Format: 12/31/2024")
+    start = el(5, widget="textbox", name="Start", locators=[Locator(kind="placeholder", value="dd/mm/yyyy")])
+    note = el(6, widget="textbox", name="Update date notes")
+    elements = [label, stage, other, close, start, note]
+    lines, kept = refine([ctl(e) for e in elements], elements)
+    assert [e.id for e in kept] == [2, 3, 4, 5, 6] and all(ln.element_id != 1 for ln in lines)
+    assert "date-picker" in close.states and "date-picker" not in start.states   # "Start" is not named as a date
+    assert "date-picker" not in note.states                                      # a date word, but no date shown

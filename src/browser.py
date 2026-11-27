@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import Error as PlaywrightError
@@ -18,6 +19,10 @@ from .watch import PageWatcher
 
 class NavigationError(Exception):
     """The URL is invalid, unreachable, or answered with an error status. The message is safe to show the user."""
+
+
+class SessionExpired(NavigationError):
+    """A saved session no longer logs in: a person must log in again (the tool never types passwords)."""
 
 
 def validate_url(url: str) -> str:
@@ -37,6 +42,7 @@ class BrowserConfig:
     dialog_policy: str = "accept"
     maximize: bool = True
     fresh_context: bool = False  # on a remote browser, open a context of our own instead of reusing the default one
+    storage_state: str | None = None  # a saved logged-in session (see sessions.py): the site must not show a login form
 
 
 class BrowserSession:
@@ -57,15 +63,15 @@ class BrowserSession:
         if c.cdp_url:
             self._browser = self._pw.chromium.connect_over_cdp(c.cdp_url)
             # Hosted browsers usually expose a single default context: use it rather than creating another.
-            if c.fresh_context or not self._browser.contexts:  # parallel workers must not share cookies or tabs
-                self._context = self._browser.new_context()
+            if c.fresh_context or c.storage_state or not self._browser.contexts:  # own cookies: workers, sessions
+                self._context = self._browser.new_context(storage_state=c.storage_state)
             else:
                 self._context = self._browser.contexts[0]
             self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
         else:
             args = ["--start-maximized"] if c.maximize and not c.headless else []
             self._browser = self._pw.chromium.launch(headless=c.headless, args=args)
-            self._context = self._browser.new_context(no_viewport=True)
+            self._context = self._browser.new_context(no_viewport=True, storage_state=c.storage_state)
             self.page = self._context.new_page()
         self.page.set_default_timeout(c.nav_timeout_ms)
         if c.maximize and not c.headless:
@@ -116,7 +122,22 @@ class BrowserSession:
         status = resp.status if resp else None
         if status is not None and status >= 400:
             raise NavigationError(f"{url} answered with HTTP {status}")
+        if self.config.storage_state and self.login_form_shown():
+            raise SessionExpired(f"{url} shows a login form: the saved session has expired or is for another site. "
+                                 f"Log in again with: test-pilot login {url}")
         return status
+
+    def login_form_shown(self) -> bool:
+        """A visible password field: the site wants a login, which only a person may do."""
+        try:
+            return self.page.locator("input[type=password]").filter(visible=True).count() > 0
+        except PlaywrightError:
+            return False
+
+    def save_state(self, path: str) -> None:
+        """Keep this browser's cookies and storage (a logged-in session), never a password."""
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._context.storage_state(path=path)
 
     def observe(self) -> Observation:
         return self.perceiver.observe()

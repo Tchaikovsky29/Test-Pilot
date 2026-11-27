@@ -13,8 +13,9 @@ from .text import clean_name
 from .models import Element, Locator
 from .roles import CONTROLS, LABELLED
 
-# Ids that look machine-generated: long digit runs, hex blobs, React :r1: ids, ember123, ui-id-3.
-_DYNAMIC_ID = re.compile(r"\d{4,}|[0-9a-f]{8,}|^:r|ember\d+|ui-id-\d+", re.I)
+# Ids that look machine-generated: long digit runs, hex blobs, React :r1: ids, ember123, ui-id-3, and a word with a
+# render counter (Lightning's input-138, combobox-button-147: the number changes every time the form is drawn).
+_DYNAMIC_ID = re.compile(r"\d{4,}|[0-9a-f]{8,}|^:r|ember\d+|ui-id-\d+|^[a-z][a-z-]*-\d{2,}$", re.I)
 _TESTID_ATTRS = ("data-testid", "data-test-id")
 _OTHER_TEST_ATTRS = ("data-test", "data-qa", "data-cy")
 MAX_TEXT_NAME = 80  # very long names (whole result cards) make brittle locators

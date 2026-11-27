@@ -227,3 +227,30 @@ def test_explorer_policy_allows_user_external_links(make):
         next(e for e in a.obs.elements if e.display_name == "Partner deals")
     )
     assert verdict.ok
+
+def test_a_hidden_copy_matched_by_the_locator_is_passed_over_for_the_visible_one(session, base_url):
+    from test_pilot.models import Locator
+    session.goto(base_url + "/form.html")
+    a = Actor(session, Policy(start_url=base_url))
+    a.look()
+    city = next(e for e in a.obs.elements if e.name == "City")
+    # an app that keeps an earlier screen rendered: the first locator's one match is a hidden copy
+    session.page.evaluate("() => { const c = document.createElement('input'); c.id = 'ghost'; c.style.display = 'none';"
+                          " document.body.prepend(c); }")
+    city.locators = [Locator(kind="css", value="#ghost")] + city.locators
+    r = a.act(Type(id=city.id, text="Pune"))
+    assert r.ok, r.message
+    assert session.page.locator("#city").input_value() == "Pune" and session.page.locator("#ghost").input_value() == ""
+
+
+def test_a_value_the_page_drops_part_of_is_typed_again_and_checked(session, base_url):
+    session.goto(base_url + "/form.html")
+    # like the Lightning field that lost its last key: the first value set loses its last character
+    session.page.evaluate("""() => { const c = document.getElementById('city'); let first = true;
+        c.addEventListener('input', () => { if (first) { first = false; c.value = c.value.slice(0, -1); } }); }""")
+    a = Actor(session, Policy(start_url=base_url))
+    a.look()
+    city = next(e for e in a.obs.elements if e.name == "City")
+    r = a.act(Type(id=city.id, text="Acme Corporation"))
+    assert r.ok, r.message
+    assert session.page.locator("#city").input_value() == "Acme Corporation"

@@ -19,7 +19,8 @@ def test_validate_url_accepts():
 
 
 @pytest.mark.parametrize("v,dyn", [("promo-8f3a9c21d4e5", True), ("ui-id-3", True), (":r1:", True),
-                                    ("hotel_location", False), ("check_in_time", False), ("from", False)])
+                                    ("hotel_location", False), ("check_in_time", False), ("from", False),
+                                    ("input-138", True), ("combobox-button-147", True), ("step-2", False)])
 def test_dynamic_ids(v, dyn):
     assert is_dynamic_id(v) is dyn
 
@@ -211,3 +212,11 @@ def test_city_and_readonly_date_fields_are_marked(flight):
     by_name = {e.name: e for e in obs.elements}
     assert "autocomplete" in by_name["From"].states
     assert "date-picker" in by_name["Departure date"].states
+
+def test_text_in_a_closed_shadow_root_is_read_and_hidden_text_still_is_not(session, base_url):
+    from test_pilot.text import shows
+    session.goto(base_url + "/shadow.html")
+    rd = session.observe().readable()
+    assert shows(rd, "Company", "Probe Labs") and shows(rd, "Email", "probe.qa@example.com")   # page script can't see it
+    assert "Booking confirmed!" not in rd                                                    # opacity:0 stays out
+    assert " ".join(rd).count("Probe Labs") == 1             # the painted copy, not the one under an opacity:0 parent

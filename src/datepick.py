@@ -13,7 +13,8 @@ How the calendar is found, generically:
   * days from neighbouring months and disabled days are skipped by their markings (class old/new/outside/disabled,
     aria-disabled), and when a grid does not mark them, by position: a small number is taken from the top of the grid,
     a large one from the bottom.
-When no calendar opens, the date is written in the format the placeholder shows ("dd/mm/yyyy"), else as ISO, and
+When no calendar opens (or none it can read), the date is written in the format the placeholder or hint shows
+("dd/mm/yyyy", or an example like "Format: 12/31/2024"), else as ISO: typed if the field can be typed into, and
 checked the same way. The result says which way worked and what the field holds.
 
 This module is also what generated tests call (`pick_date(page, locator, "2026-12-03")`), so a test sets dates
@@ -137,13 +138,30 @@ def means(value: str, d: date) -> bool:
     return year and day and month
 
 
-def in_format(d: date, placeholder: str) -> str | None:
-    """The date in the format a placeholder like "dd/mm/yyyy" or "MM-DD-YY" shows, if it shows one."""
-    m = re.search(r"\b(dd|mm|yyyy|yy)([-/. ])(dd|mm|yyyy|yy)\2(dd|mm|yyyy|yy)\b", placeholder.lower())
-    if not m or len({m.group(1), m.group(3), m.group(4)} & {"dd", "mm"}) != 2:
+def in_format(d: date, hint: str) -> str | None:
+    """The date in the format a hint shows: a pattern ("dd/mm/yyyy", "MM-DD-YY") or an example date
+    ("Format: 12/31/2024": 31 cannot be a month, so month/day/year). None when the hint shows neither."""
+    h = hint.lower()
+    m = re.search(r"\b(dd|mm|yyyy|yy)([-/. ])(dd|mm|yyyy|yy)\2(dd|mm|yyyy|yy)\b", h)
+    if m and len({m.group(1), m.group(3), m.group(4)} & {"dd", "mm"}) == 2:
+        parts = {"dd": f"{d.day:02d}", "mm": f"{d.month:02d}", "yyyy": f"{d.year}", "yy": f"{d.year % 100:02d}"}
+        return m.group(2).join(parts[g] for g in (m.group(1), m.group(3), m.group(4)))
+    m = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", h)
+    if m:
+        return d.isoformat()
+    m = re.search(r"\b(\d{1,2})([/.-])(\d{1,2})\2(\d{4}|\d{2})\b", h)
+    if not m:
         return None
-    parts = {"dd": f"{d.day:02d}", "mm": f"{d.month:02d}", "yyyy": f"{d.year}", "yy": f"{d.year % 100:02d}"}
-    return m.group(2).join(parts[g] for g in (m.group(1), m.group(3), m.group(4)))
+    a, sep, b, y = int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
+    if a > 12 and b <= 12:
+        first, second = d.day, d.month  # day first
+    elif b > 12 and a <= 12:
+        first, second = d.month, d.day  # month first
+    else:
+        return None  # 05/06/2024 does not say which is which
+    zeros = m.group(1).startswith("0") or m.group(3).startswith("0")  # "31.01.2024": the site pads to two digits
+    year = str(d.year) if len(y) == 4 else f"{d.year % 100:02d}"
+    return sep.join([f"{first:02d}" if zeros else str(first), f"{second:02d}" if zeros else str(second), year])
 
 
 def _value(field: Locator) -> str:
@@ -166,7 +184,7 @@ def _open(field: Locator) -> None:
             pass
 
 
-def pick_date(field: Locator, iso: str, timeout_ms: int = 4000) -> Picked:
+def pick_date(field: Locator, iso: str, timeout_ms: int = 4000, hint: str = "") -> Picked:
     """Set `field` to the date `iso` (YYYY-MM-DD). Never raises for a picker it does not understand: returns why."""
     try:
         d = date.fromisoformat(iso)
@@ -212,8 +230,12 @@ def pick_date(field: Locator, iso: str, timeout_ms: int = 4000) -> Picked:
             return Picked(False, _value(field), "", f"could not reach {iso} in the calendar within {MAX_MONTH_STEPS} months")
 
         placeholder = field.get_attribute("placeholder", timeout=timeout_ms) or ""
-        text = in_format(d, placeholder) or iso
-        handle.evaluate(_SET_VALUE, text)
+        text = in_format(d, f"{placeholder} {hint}") or iso
+        if field.is_editable(timeout=timeout_ms):  # type it as a person would, then leave the field so it is checked
+            field.fill(text, timeout=timeout_ms)
+            field.press("Tab", timeout=timeout_ms)
+        else:
+            handle.evaluate(_SET_VALUE, text)
         page.wait_for_timeout(300)
         value = _value(field)
         if means(value, d):

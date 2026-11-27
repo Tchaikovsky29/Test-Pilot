@@ -85,3 +85,11 @@ def test_a_field_covered_by_a_shade_is_still_opened(session, base_url):
     page.evaluate("() => { const s = document.getElementById('shade'); s.classList.add('open'); s.onclick = null; }")
     picked = pick_date(page.locator("#when"), "2026-11-28")             # the click cannot land: focus + click event
     assert picked.ok, picked.message
+
+
+def test_an_example_date_in_a_hint_gives_the_format():
+    d = date(2026, 12, 3)
+    assert in_format(d, "Format: 12/31/2024") == "12/3/2026"            # 31 is no month: month/day/year
+    assert in_format(d, "e.g. 31.01.2024") == "03.12.2026"              # day first, with the example's zeros
+    assert in_format(d, "Format: 2024-12-31") == "2026-12-03"
+    assert in_format(d, "05/06/2024") is None                           # ambiguous: no guess
