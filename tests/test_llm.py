@@ -157,6 +157,14 @@ def test_reasoning_effort_only_when_asked(fake):
     assert sent(fake)["reasoning_effort"] == "low"
 
 
+def test_openrouter_gets_its_own_reasoning_object(fake):
+    fake.script = [{"content": "hi"}, {"content": "hi"}]
+    make(fake, "openrouter", LLM_REASONING_EFFORT="low").chat(MSG)
+    assert sent(fake)["reasoning"] == {"effort": "low"} and "reasoning_effort" not in sent(fake)
+    make(fake, "openrouter", LLM_REASONING_EFFORT="none").chat(MSG)   # a model with no effort levels can still stop
+    assert sent(fake)["reasoning"] == {"enabled": False}
+
+
 def test_json_mode_sets_response_format_and_adds_the_word_json_if_missing(fake):
     fake.script = [{"content": "{}"}, {"content": "{}"}]
     llm = make(fake)

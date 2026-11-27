@@ -148,3 +148,136 @@ def test_what_a_form_holds_is_not_read_as_a_saved_value():
     rd = obs.readable()
     assert rd == ["Email", "john@example.com"]                      # the edit box is input, the link is display
     assert not shows(rd, "First Name", "John") and shows(rd, "Email", "john@example.com")
+
+
+def test_a_negative_case_must_assert_the_message_not_just_the_url():
+    url_only = [{"kind": "url_contains", "value": "lightning/o/Lead/new"}]     # TC-02 as first designed
+    c = _design(type="Negative", expected=url_only)
+    assert c.grounding != "observed" and any("no validation message" in p for p in c.problems)
+    nav = _design(type="Navigation", expected=[{"kind": "element_visible", "value": "Save"}])
+    assert nav.grounding == "observed", nav.problems                          # navigation may check a screen
+
+
+def test_any_problem_keeps_a_case_from_counting_as_observed():
+    c = _design(steps=[{"description": "Click New", "event": 0, "target": "New"},      # TC-06: a step that doesn't exist
+                       {"description": "Click Save", "target": "Save"}],
+                expected=[{"kind": "field_shows", "label": "Company", "value": "TechNova Solutions"}])
+    assert any("E0, which does not exist" in p for p in c.problems)
+    assert c.grounding == "partial"                                            # was "observed" before
+
+
+# ---- what the second Salesforce verify run showed -----------------------------------------------------------------
+
+def test_a_fields_message_drops_hidden_text_repeating_its_label():
+    from test_pilot.evidence import _without_name
+    assert _without_name("Last Name Complete this field.", "Last Name") == "Complete this field."
+    assert _without_name("* Company: Complete this field.", "Company") == "Complete this field."
+    assert _without_name("Complete this field.", "Last Name") == "Complete this field."
+    assert _without_name("Last Name", "Last Name") == "Last Name"           # nothing else: keep it
+
+
+def _report_with_events():
+    from test_pilot.explorer import Event
+    r = _report()
+    for n, (step, msg) in enumerate([(NEW, 'clicked "New"'),
+                                     (_step("type", "textbox", "* Last Name", "Anderson"), 'typed into "* Last Name"'),
+                                     (SAVE, 'clicked "Save"')], 1):
+        r.events.append(Event(n=n, url="https://crm.test/", page="lead", action={"kind": step.kind}, status="ok",
+                              message=msg, step=step))
+    return r
+
+
+def test_a_step_naming_a_recorded_control_replays_it_with_its_own_value():
+    reply = DesignReply.model_validate({"cases": [{
+        "title": "Lead needs a Company", "module": "Leads", "covers": [1], "type": "Validation", "priority": "High",
+        "steps": [{"description": "Click New", "event": 1},
+                  {"description": "Enter Last Name NoCompany", "target": "Last Name", "value": "NoCompany"},
+                  {"description": "Click Save", "target": "Save"}],
+        "expected_result": "not saved", "expected": [{"kind": "field_error", "label": "Company", "value": ""}]}]})
+    c = finalize(reply, _report_with_events()).cases[0]
+    assert [s.event for s in c.steps] == [1, 2, 3]
+    assert c.steps[1].value == "NoCompany" and c.steps[1].recorded.value == "Anderson"   # replayed with the case's value
+    assert not any("not seen on the page" in p for p in c.problems)
+
+
+def test_an_element_check_finds_a_heading_and_a_labelled_error_finds_its_field(base_url):
+    steps = _create(company="")
+    case = TestCase(id="TC-03", title="Lead needs a Company", module="Leads", type="Validation", priority="High",
+                    steps=steps, expected_result="not saved",
+                    expected=[Expectation(kind="field_error", label="Company", value=""),
+                              Expectation(kind="element_visible", value="New Lead", observed=True)])
+    v = verify_case(case, base_url + "/crm.html", NoModel(), BrowserConfig())
+    assert v.status == "verified", v.reason
+    assert v.expectations[0].actual == "Complete this field."
+    assert "Company" in v.assertions[0].locator.value
+    assert v.assertions[1].kind == "text_visible" and v.assertions[1].value == "New Lead"
+
+
+def _record_report():
+    """New -> Save lands on a record page; its Details tab (E3, the explorer's own click) shows Name."""
+    from test_pilot.evidence import Changes
+    from test_pilot.explorer import Event
+    details = _step("click", "tab", "Details")
+    r = ExplorationReport(url="https://crm.test/", requirement="create a lead",
+                          plan=Plan(requirement_points=["create a lead"]),
+                          pages=[PageInfo(signature="form", url="https://crm.test/new", buttons=["Save"]),
+                                 PageInfo(signature="record", url="https://crm.test/lead/1",
+                                          texts=["Lead", "John Anderson", "Title Company TechNova Solutions"],
+                                          buttons=["Details"]),
+                                 PageInfo(signature="details", url="https://crm.test/lead/1",   # the tab: its own view
+                                          texts=["Name John Anderson", "Company TechNova Solutions"])])
+    for n, (page, step, ch) in enumerate([("form", SAVE, Changes(navigated=True)),
+                                          ("record", details, Changes(appeared=["Name John Anderson"])),
+                                          ("details", _step("click", "button", "Follow"), Changes())], 1):
+        r.events.append(Event(n=n + 1, url="u", page=page, action={"kind": "click"}, status="ok",
+                              message=f'clicked [{n}] {step.widget} "{step.element_name}" -> page changed',
+                              step=step, changes=ch))
+    r.events.insert(0, Event(n=1, url="u", page="form", action={"kind": "type"}, status="ok", message="typed",
+                             step=_step("type", "textbox", "Company", "TechNova Solutions")))
+    return r
+
+
+def _record_case(steps, expected):
+    reply = DesignReply.model_validate({"cases": [{
+        "title": "Create a lead", "module": "Leads", "covers": [1], "type": "Positive", "priority": "High",
+        "steps": steps, "expected_result": "saved", "expected": expected}]})
+    return finalize(reply, _record_report()).cases[0]
+
+
+def test_a_value_shown_only_after_a_skipped_click_is_flagged_with_that_click():
+    typed = {"description": "Enter Company", "event": 1, "value": "Globex"}
+    saved = [typed, {"description": "Save", "event": 2}]
+    c = _record_case(saved, [{"kind": "field_shows", "label": "Name", "value": "Ann Lee"},
+                             {"kind": "field_shows", "label": "Company", "value": "Globex"}])
+    assert any('"Name" is only shown after E3 (clicked tab "Details")' in p for p in c.problems), c.problems
+    assert not any('"Company"' in p for p in c.problems)      # new data under a label the record page shows
+    c = _record_case(saved + [{"description": "Open Details", "event": 3}],
+                     [{"kind": "field_shows", "label": "Name", "value": "John Anderson"}])
+    assert not any("only shown after" in p for p in c.problems) and c.grounding == "observed", c.problems
+
+
+def test_the_skipped_click_is_kept_for_the_verifier():
+    saved = [{"description": "Enter Company", "event": 1, "value": "Globex"}, {"description": "Save", "event": 2}]
+    c = _record_case(saved, [{"kind": "field_shows", "label": "Name", "value": "Ann Lee"}])
+    assert c.expected[0].reveal is not None and c.expected[0].reveal.element_name == "Details"
+
+
+def test_the_verifier_adds_the_click_that_shows_a_checked_value_without_the_model(base_url):
+    case = TestCase(id="TC-05", title="Create a Lead", module="Leads", type="Positive", priority="High",
+                    steps=_create(), expected_result="saved",
+                    expected=[Expectation(kind="field_shows", label="Company", value="TechNova Solutions"),
+                              Expectation(kind="field_shows", label="Lead Source", value="Web",
+                                          reveal=_step("click", "tab", "Details"))])
+    v = verify_case(case, base_url + "/crm.html", NoModel(), BrowserConfig())
+    assert v.status == "verified", v.reason
+    assert v.steps[-1].description.startswith("(added)") and v.steps[-1].how == "replayed"
+    assert v.definition[-1].element_name == "Details" and any("added step" in n for n in v.notices)
+    assert {a.label for a in v.assertions} == {"Company", "Lead Source"}
+
+
+def test_a_negative_case_must_also_show_that_nothing_was_saved():
+    msg_only = [{"kind": "field_error", "label": "Company", "value": "Complete this field."}]
+    c = _design(type="Validation", expected=msg_only)
+    assert any("no check that nothing was saved" in p for p in c.problems)
+    c = _design(type="Validation", expected=msg_only + [{"kind": "url_contains", "value": "crm.test/lead"}])
+    assert not any("nothing was saved" in p for p in c.problems)

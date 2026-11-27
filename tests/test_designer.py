@@ -77,11 +77,11 @@ def test_steps_that_cite_failed_or_missing_events_or_unseen_controls_are_flagged
                                {"description": "Click Search", "target": "Search"}],
                         expected=[{"kind": "text_visible", "value": "Coupon applied"}]))
     c = r.cases[0]
-    assert c.grounding == "unverified"
+    assert c.grounding == "partial"                                # only because "Search" is the recorded E1 click
     joined = " | ".join(c.problems)
     assert "E4, which did not succeed (failed)" in joined and "E99, which does not exist" in joined
     assert '"Apply coupon", which was not seen' in joined and '"Search"' not in joined   # Search is a known control
-    assert [s.event for s in c.steps] == [None, None, None, None]
+    assert [s.event for s in c.steps] == [None, None, None, 1]    # a target naming a recorded control replays it
     assert len(c.problems) == 4                                    # one per bad step, plus the unseen outcome
 
 

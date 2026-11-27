@@ -8,6 +8,7 @@
   #form { background: #fff; padding: 16px; width: 420px; }
   .row { margin: 6px 0; }
   .err { color: #b00; font-size: 12px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   #toast { position: fixed; top: 8px; right: 8px; background: #2e844a; color: #fff; padding: 8px; }
   dl div { display: flex; gap: 12px; } dt { width: 120px; color: #555; }
 </style></head>
@@ -41,7 +42,11 @@
     main.innerHTML = `<p><a href="crm.html">Leads</a></p><h1>${l.first} ${l.last}</h1>
       ${q.get("new") ? `<div id="toast" role="status">Lead "${l.first} ${l.last}" was created.</div>` : ""}
       ${dup ? '<div role="alert">This record looks like a duplicate. View duplicates.</div>' : ""}
-      <dl>${field("Name", `${l.first} ${l.last}`)}${field("Company", l.company)}${field("Email", l.email)}${field("Phone", l.phone)}</dl>`;
+      <dl>${field("Name", `${l.first} ${l.last}`)}${field("Company", l.company)}${field("Email", l.email)}${field("Phone", l.phone)}</dl>
+      <div role="tablist"><button type="button" role="tab" id="tab-details" aria-selected="false">Details</button></div>
+      <dl id="details" hidden>${field("Lead Source", "Web")}</dl>`;
+    // like a record page's tabs: some saved fields only show once their tab is opened
+    document.getElementById("tab-details").onclick = () => document.getElementById("details").hidden = false;
   } else {
     main.innerHTML = `<h1>Leads</h1><button type="button" id="new">New</button>
       <table><tr><th>Name</th><th>Company</th></tr>${leads.map((l, i) =>
@@ -52,10 +57,11 @@
   document.getElementById("save").onclick = () => {
     const v = id => document.getElementById(id).value.trim();
     const missing = [["ln", "Last Name"], ["co", "Company"]].filter(([id]) => !v(id));
-    for (const [id] of [["ln"], ["co"]]) {
+    for (const [id, label] of [["ln", "Last Name"], ["co", "Company"]]) {
       const bad = missing.some(([m]) => m === id);
       document.getElementById(id).setAttribute("aria-invalid", bad ? "true" : "false");
-      document.getElementById(id + "-err").textContent = bad ? "Complete this field." : "";
+      // like Lightning: hidden text repeating the label comes first in the field's description
+      document.getElementById(id + "-err").innerHTML = bad ? `<span class="sr">${label}</span> Complete this field.` : "";
     }
     if (missing.length) {
       document.getElementById("snaglist").textContent = missing.map(m => m[1]).join(", ");

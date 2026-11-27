@@ -205,12 +205,17 @@ class LLM:
         kwargs: dict[str, Any] = {"model": c.model, "messages": msgs, p.token_param: max_tokens or c.max_tokens}
         if p.temperature:
             kwargs["temperature"] = c.temperature
-        if c.reasoning_effort:
+        if c.reasoning_effort and p.name != "openrouter":
             kwargs["reasoning_effort"] = c.reasoning_effort
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         if p.name == "openrouter":
             kwargs["extra_body"] = {"session_id": self.session_id}
+            if c.reasoning_effort:
+                # OpenRouter's own form. A model that lists no effort levels ignores "low" (it thinks as long as it
+                # likes, inside max_tokens), but most can switch reasoning off: that is what "none" does.
+                kwargs["extra_body"]["reasoning"] = ({"enabled": False} if c.reasoning_effort == "none"
+                                                     else {"effort": c.reasoning_effort})
         self.usage.calls += 1  # counted when attempted: a failing call still spends quota
         try:
             resp = self._client.chat.completions.create(**kwargs)

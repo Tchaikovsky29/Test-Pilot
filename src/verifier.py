@@ -33,12 +33,13 @@ from .llm import LLMError
 from .locators import ensure_locator
 from .models import Element, Locator, Observation
 from .policy import Policy
-from .text import clip, fold, shows
+from .text import clip, fold, same_label, shows
 
 CaseStatus = Literal["verified", "unconfirmed", "failed", "blocked"]
 _DUPLICATE = re.compile(r"\bduplicate", re.I)
-MAX_AGENT_ACTIONS = 6
-SETTLE_AGAIN_MS = 1500  # extra wait before re-reading a page whose saved values had not appeared  # per step: open a dropdown, type, pick the option, ... but not wander off
+MAX_AGENT_ACTIONS = 6  # per step: open a dropdown, type, pick the option, ... but not wander off
+SETTLE_AGAIN_MS = 1500  # extra wait before re-reading a page whose saved values had not appeared
+FIND_WAIT_S = 10.0  # how long a recorded step's control may take to appear before the model is asked instead
 DEFAULT_CASE_SECONDS = 180.0
 SKIPPED_KINDS = ("scroll", "wait")  # exploration moves, not test steps: locators do not need the element on screen
 
@@ -225,9 +226,10 @@ def _replay(run: _Run, rec: Step, value: str) -> ActionResult | None:
     if rec.kind == "go_back":
         return run.do(GoBack())
     e = None
-    for _ in range(3):
+    until = time.monotonic() + FIND_WAIT_S  # a form opened in a fresh browser can take a while to fill in
+    while True:
         e = _find(run.actor.obs, rec)
-        if e is not None:
+        if e is not None or time.monotonic() > until:
             break
         run.actor.session.watcher.settle(cap_ms=1500)
         run.page_text = run.actor.look()
@@ -323,17 +325,25 @@ def _url_contains(s: _Seen, x: Expectation) -> Outcome:
 
 def _element_visible(s: _Seen, x: Expectation) -> Outcome:
     e = next((e for e in s.obs.elements if _contains([e.display_name], x.value)), None)
-    return ("confirmed", "", s.on(e, x.kind, x.value)) if e is not None else ("not_seen", "", None)
+    if e is not None:
+        return "confirmed", "", s.on(e, x.kind, x.value)
+    # a heading or a block of text is an element too ("New Lead" over a form): the designer grounds it the same way
+    if _contains([ln.text for ln in s.obs.lines if ln.kind in ("heading", "text")], x.value):
+        return "confirmed", "", Assertion(kind="text_visible", value=x.value)
+    return "not_seen", "", None
 
 
 def _field_error(s: _Seen, x: Expectation) -> Outcome:
-    hit = next(((e, m) for e, m in s.errors if _contains([m, f"{e.display_name}: {m}"], x.value)), None)
+    errors = s.errors
+    if x.label:  # the field it is about: only that field's error counts
+        errors = [(e, m) for e, m in s.errors if same_label(e.display_name, x.label)]
+    hit = next(((e, m) for e, m in errors if _contains([m, f"{e.display_name}: {m}"], x.value)), None)
     if hit is not None:
         return "confirmed", "", s.on(hit[0], x.kind, hit[1], native=bool(hit[0].validation))
     if _contains(s.last.errors, x.value):  # reported, but the field is no longer in error
         return "confirmed", "", Assertion(kind="text_visible", value=x.value)
-    if not x.observed and s.errors:  # a guessed message: the field's own one is the fact
-        e, m = s.errors[0]
+    if (not x.observed or not x.value.strip()) and errors:  # a guessed (or missing) message: the field's own one is the fact
+        e, m = errors[0]
         return "corrected", m, s.on(e, x.kind, m, native=bool(e.validation))
     if not x.observed and s.notice:  # many sites report a missing field in a page-level message instead
         msg = clip(s.notice[0], 200)
@@ -386,6 +396,35 @@ def check(run: _Run, expected: list[Expectation]) -> tuple[list[ExpectationResul
         if a is not None and not any((b.kind, b.value, b.locator) == (a.kind, a.value, a.locator) for b in asserts):
             asserts.append(a)  # several guesses can resolve to the same message: check it once
     return results, asserts
+
+
+def _reveal(run: _Run, case: TestCase, out: VerifiedCase) -> tuple[list[ExpectationResult], list[Assertion]]:
+    """Values the case checks where they are not shown (the designer found the recorded click that shows them, a tab
+    or a section, which the case skips): replay that click, no model, and check again. The click becomes a step of
+    the case's definition, and a notice says so."""
+    results, asserts = out.expectations, out.assertions
+    todo: list[Step] = []
+    for x, r in zip(case.expected, results):
+        if r.status == "not_seen" and x.reveal is not None and x.reveal not in todo:
+            todo.append(x.reveal)
+    added = 0
+    for rec in todo:
+        r = _replay(run, rec, rec.value or "")
+        ok = r is not None and r.ok
+        what = f'{rec.kind} {rec.widget or "control"} "{clip(rec.element_name, 40)}"'
+        out.steps.append(StepResult(n=len(out.steps) + 1, description=f"(added) {what}, to show the checked values",
+                                    status="done" if ok else "failed", how="replayed", actions=1,
+                                    message=r.message if r is not None else "its control was not found"))
+        if ok:
+            added += 1
+            run.notices.append(f"added step: {what}: the case checks values shown only after it")
+    if not added:
+        return results, asserts
+    again, asserts2 = check(run, case.expected)
+    # whatever was confirmed before the click stays confirmed (a toast may be gone by now)
+    merged = [b if b.status != "not_seen" or a.status == "not_seen" else a for a, b in zip(results, again)]
+    kept = [a for a in asserts if not any((a.kind, a.label, a.value) == (b.kind, b.label, b.value) for b in asserts2)]
+    return merged, kept + asserts2
 
 
 def verify_case(case: TestCase, url: str, llm, browser: BrowserConfig, *, max_seconds: float = DEFAULT_CASE_SECONDS,
@@ -442,8 +481,9 @@ def verify_case(case: TestCase, url: str, llm, browser: BrowserConfig, *, max_se
                 out.definition = [s for s in actor.steps if s.kind not in SKIPPED_KINDS]
                 return finish("failed", f"step {n}: {res.message}")
 
-        out.definition = [s for s in actor.steps if s.kind not in SKIPPED_KINDS]
         out.expectations, out.assertions = check(run, case.expected)
+        out.expectations, out.assertions = _reveal(run, case, out)
+        out.definition = [s for s in actor.steps if s.kind not in SKIPPED_KINDS]
         if not case.expected:
             return finish("unconfirmed", "the case has no checkable expected outcome")
         missed = [x for x in out.expectations if x.status == "not_seen"]

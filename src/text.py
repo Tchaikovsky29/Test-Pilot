@@ -52,6 +52,12 @@ def clean_name(name: str) -> str:
             return out
         out = out[:m.start()]
 
+def same_label(name: str, label: str) -> bool:
+    """A control's name and a label written for it: "* Last Name" and "Last Name:" are the same field."""
+    a, b = fold(name).strip(" *:"), fold(label).strip(" *:")
+    return bool(a) and a == b
+
+
 def shows(readable: list[str], label: str, value: str, within: int = 2) -> bool:
     """Does a page read as `label` followed, within a few lines, by `value`? How a record page shows a saved field
     ("Company" ... "TechNova Solutions"), whatever its markup. Also accepts "Label: value" on one line."""

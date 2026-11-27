@@ -35,9 +35,25 @@ def field_errors(obs: Observation) -> list[tuple[Element, str]]:
     out = []
     for e in obs.elements:
         msg = e.validation or (e.description if "invalid" in e.states else "")
+        msg = _without_name(msg, e.display_name)
         if msg:
             out.append((e, msg))
     return out
+
+
+def _without_name(msg: str, name: str) -> str:
+    """The message as shown under the field: a description often starts with hidden text repeating the field's own
+    label ("Last Name Complete this field."), which a test asserting the visible text would never find."""
+    n = fold(name).strip(" *:")
+    words = msg.split()
+    for k in range(1, len(words)):
+        head = fold(" ".join(words[:k])).strip(" *:-")
+        if head == n:
+            rest = " ".join(words[k:]).lstrip(" :-")
+            return rest or msg
+        if len(head) > len(n):
+            break
+    return msg
 
 
 def _errors(obs: Observation) -> dict[int, str]:

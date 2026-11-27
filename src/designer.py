@@ -19,13 +19,15 @@ from pydantic import BaseModel, Field, field_validator
 from .actions import Step
 from .explorer import Event, ExplorationReport, PageInfo
 from .llm import LLMError
-from .text import clip, fold, shows
+from .text import clip, fold, same_label, shows
 
 TestType = Literal["Positive", "Negative", "Boundary", "Validation", "Navigation", "E2E"]
 Priority = Literal["High", "Medium", "Low"]
 ExpectKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible", "field_shows"]
 AssertKind = Literal["text_visible", "text_gone", "field_error", "alert", "url_contains", "element_visible", "field_shows",
                      "field_value"]
+MESSAGE_KINDS = {"field_error", "alert"}  # what a negative case says went wrong
+STILL_THERE_KINDS = {"url_contains", "element_visible", "text_visible", "text_gone"}  # ...and that it went nowhere
 UI_ONLY = {"element_visible", "url_contains"}  # checks that show a screen was reached, not that anything was achieved
 _EXISTING = re.compile(r"\b(exists?|existing|already (created|saved|present))\b", re.I)
 Grounding = Literal["observed", "partial", "unverified"]
@@ -67,9 +69,12 @@ class Expectation(BaseModel):
     """A checkable claim about the outcome. `evidence` lists the events whose recorded changes show it."""
     kind: ExpectKind
     value: str  # the text, URL fragment or control name to check (for field_shows: the saved value)
-    label: str = ""  # field_shows only: the field label the value is shown under ("Company")
+    label: str = ""  # field_shows: the label the value is shown under ("Company"); field_error: the field in error
     evidence: list[int] = Field(default_factory=list)
     observed: bool = False  # set by the code: the value was found in the recorded evidence
+    # set by the code: a recorded click the case skips that shows this value (a tab, a section); the verifier
+    # replays it, without the model, if the value is not on the page the case ends on
+    reveal: Step | None = None
 
     @field_validator("evidence", mode="before")
     @classmethod
@@ -181,10 +186,12 @@ control exactly as it appears in the evidence ("target"). Never cite a FAILED or
 never design a case that expects such a failure.
 - Expected outcomes must be checkable. Give each as {"kind", "value", "evidence"}: kind is one of text_visible, \
 text_gone, field_error, alert, url_contains, element_visible; value is the exact text, URL fragment or control name as \
-recorded (for field_error and alert: the message text itself, never just the field's name); evidence lists the event \
+recorded (for field_error and alert: the message text itself, never just the field's name; a field_error also gives \
+"label": the field in error, and an empty value if the evidence never showed its message); evidence lists the event \
 numbers whose changes show it. field_shows checks a saved value as the record or detail page displays it, using \
 the label that page shows (from its "reads:" lines, not the form's field names): {"kind": "field_shows", \
-"label": "Company", "value": "TechNova Solutions"}. If you expect something the evidence does not show \
+"label": "Company", "value": "TechNova Solutions"}. If a value is shown only after a further click (a tab, a section, \
+"show more"), the case includes that click before checking it, as the explorer's steps show. If you expect something the evidence does not show \
 (for example a validation message nobody triggered), still write it, with an empty evidence list: it will be checked.
 - Each case runs on its own, in a fresh browser opened at the application URL: list every step needed to get from \
 there to what it checks (dismissing a notice, opening a tab, filling the fields before the one under test). If it needs \
@@ -192,7 +199,9 @@ something to exist first (an account, a customer), create it in its own first st
 on another case or on data that may not be there.
 - Test business outcomes, not clicks. Not "open the form, enter details, click Save", but "create the record with valid \
 details, check it was saved, and check the saved values match what was entered" (field_shows for each key field, and \
-the list or search it should appear in). Negative cases check that nothing was saved and the right message was shown.
+the list or search it should appear in). Negative and validation cases check the message the application shows \
+(field_error or alert) and that nothing was saved (the form is still shown: url_contains its address, or its title); \
+staying on the same URL or a control still being visible is not enough on its own.
 - Required fields are the ones the application showed as required or complained about: never assume a field is \
 mandatory. Use realistic test data (made-up people and companies, example.com emails) that a person could re-enter, \
 and steps another tester can follow without guessing.
@@ -211,7 +220,7 @@ REPLY with JSON only:
   "steps": [{"description": "...", "event": 3, "target": "", "value": "", "setup": false}],
   "expected_result": "in words",
   "expected": [{"kind": "field_shows", "label": "...", "value": "...", "evidence": [7]},
-               {"kind": "field_error", "value": "...", "evidence": [5]}]}],
+               {"kind": "field_error", "label": "...", "value": "...", "evidence": [5]}]}],
  "unsupported": [{"point": 4, "reason": "..."}]}"""
 
 
@@ -317,6 +326,33 @@ class _Evidence:
             return [t for p in self.pages for t in [p.title, *p.headings, *p.buttons, *(f.name for f in p.fields)]]
         return []
 
+    def event_for(self, step: "CaseStep") -> Event | None:
+        """The recorded step on the control a step names, when the model gave only its target: entering a different
+        value in the same field (or clicking the same button) is still a replay, with the case's own value."""
+        if not step.target:
+            return None
+        kinds = ("type", "select") if step.value else ("click",)
+        hits = [e for e in self.events.values() if e.status == "ok" and e.step is not None
+                and e.step.locator is not None and e.step.kind in kinds and same_label(e.step.element_name, step.target)]
+        where = {(h.step.frame_url, h.step.locator.kind, h.step.locator.role, h.step.locator.value) for h in hits}
+        return hits[0] if len(where) == 1 else None  # two different controls of that name: leave it to the verifier
+
+    def end_page(self, case: "TestCase") -> PageInfo | None:
+        """The page a case's checks run on, when its steps make that certain: the one recorded right after its last
+        step, which must repeat a recorded event (a step the explorer never took could have gone anywhere)."""
+        last = case.steps[-1].event if case.steps else None
+        nxt = self.events.get(last + 1) if last is not None else None
+        return next((p for p in self.pages if nxt is not None and p.signature == nxt.page), None)
+
+    def opened_by_skipped_step(self, case: "TestCase", end: PageInfo, label: str) -> Event | None:
+        """A recorded step, taken from the page the case ends on but not in the case, after which `label` appeared:
+        a tab, a section or a "show more" the checks need. Its changes list only what was not there before."""
+        if _has_label(end.texts, label):
+            return None
+        done = {s.event for s in case.steps}
+        return next((e for e in self.events.values() if e.page == end.signature and e.n not in done
+                     and e.status == "ok" and e.changes is not None and _has_label(e.changes.appeared, label)), None)
+
     def known_control(self, name: str) -> bool:
         n = fold(name).strip()
         return bool(n) and any(n == c or (len(n) >= 4 and (n in c or c in n)) for c in self.control_names)
@@ -325,6 +361,21 @@ class _Evidence:
 def _contains(haystack: list[str], needle: str) -> bool:
     n = fold(needle).strip()
     return bool(n) and any(n in fold(h) for h in haystack if h)
+
+
+def _has_label(texts: list[str], label: str) -> bool:
+    """Is `label` shown as a label: a line of its own, or leading a line ("Name John Doe", "Company: Acme"), or a word
+    of a joined line (a header that reads "... Title Company Acme Corp")?"""
+    lab = fold(label).strip(" *:")
+    return bool(lab) and any(re.search(rf"(^|\s){re.escape(lab)}(:|\s|$)", fold(t).strip()) for t in texts)
+
+
+def _seen_in(x: Expectation, texts: list[str]) -> bool:
+    if x.kind == "field_error" and x.label:  # recorded as "Field: message": that field's error, with that message
+        lab = fold(x.label).strip(" *:")
+        return any(fold(t).strip(" *").startswith(lab + ":") and (not x.value.strip() or _contains([t], x.value))
+                   for t in texts)
+    return _contains(texts, x.value)
 
 
 def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
@@ -349,24 +400,40 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
                 step.value = step.value or (e.step.value or "")
                 support.append(f"step {i} repeats E{e.n}: {clip(_no_ids(e.message), 120)}")
                 continue
+        linked = ev.event_for(step)
+        if linked is not None:
+            step.event, step.recorded = linked.n, linked.step
+            step.locator = linked.step.locator.python()
+            support.append(f'step {i} uses the control of E{linked.n} ("{clip(step.target, 40)}")')
+            continue
         if step.target and ev.known_control(step.target):
             continue
         steps_ok = False
         problems.append(f'step {i} uses "{clip(step.target or step.description, 60)}", which was not seen on the page')
 
+    end = ev.end_page(case)
     for x in case.expected:
         if x.kind == "field_shows":
             page = next((p for p in ev.pages if shows(p.texts, x.label, x.value)), None)
             x.evidence, x.observed = [], page is not None
-            if page is not None:
+            missed = ev.opened_by_skipped_step(case, end, x.label) if end is not None else None
+            x.reveal = missed.step if missed is not None else None
+            if missed is not None:  # checked where the label is not shown: another click was needed to see it
+                problems.append(f'"{clip(x.label, 30)}" is only shown after E{missed.n} '
+                                f'({clip(_no_ids(missed.message).split(" -> ")[0], 60)}), which this case does not do '
+                                "(the verifier adds it)")
+            elif page is not None:
                 support.append(f'"{clip(x.label, 30)}" shows "{clip(x.value, 40)}" on {clip(page.url, 80)}')
+            elif end is not None and _has_label(end.texts, x.label):
+                # new test data under a label the case's last page shows: nothing to doubt, just not seen yet
+                support.append(f'"{clip(x.label, 30)}" is shown on the page this case ends on; its value is new')
             else:
                 problems.append(f'"{clip(x.label, 30)}" showing "{clip(x.value, 40)}" was never observed')
             continue
         cited = [ev.events[n] for n in x.evidence if n in ev.events]
-        hit = next((e for e in cited if _contains(ev.texts(x.kind, e), x.value)), None)
+        hit = next((e for e in cited if _seen_in(x, ev.texts(x.kind, e))), None)
         if hit is None:  # the model may cite the wrong step, or none: look through all of them
-            hit = next((e for e in ev.events.values() if _contains(ev.texts(x.kind, e), x.value)), None)
+            hit = next((e for e in ev.events.values() if _seen_in(x, ev.texts(x.kind, e))), None)
         if hit is not None:
             x.evidence, x.observed = [hit.n], True
             support.append(f'{x.kind} "{clip(x.value, 60)}" seen after E{hit.n}')
@@ -378,10 +445,18 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
             problems.append(f'expected {x.kind} "{clip(x.value, 60)}" was never observed')
     if not case.expected:
         problems.append("no checkable expected outcome")
-    # the reference bar: a positive or end-to-end case proves a result, and every case can run on its own
-    outcome_ok = not (case.type in ("Positive", "E2E") and case.expected and {x.kind for x in case.expected} <= UI_ONLY)
-    if not outcome_ok:
+    # the reference bar: every case proves something beyond reaching a screen, and runs on its own
+    # Only a navigation case may stop at "the screen was reached"; a negative case proves the message and that
+    # nothing was saved, a positive one proves the result.
+    outcome_ok = not (case.type != "Navigation" and case.expected and {x.kind for x in case.expected} <= UI_ONLY)
+    if not outcome_ok and case.type in ("Negative", "Validation", "Boundary"):
+        problems.append("no validation message or saved result asserted: only that a screen was reached")
+    elif not outcome_ok:
         problems.append("no business outcome asserted: only that a screen was reached")
+    kinds = {x.kind for x in case.expected}
+    if case.type in ("Negative", "Validation") and kinds & MESSAGE_KINDS and not kinds & STILL_THERE_KINDS:
+        problems.append("no check that nothing was saved: also check the form is still shown (url_contains its "
+                        "address, or its title) after the message")
     needs = [p for p in case.preconditions if _EXISTING.search(p)]
     independent = not needs or any(s.setup for s in case.steps)
     if not independent:
@@ -393,7 +468,8 @@ def ground(case: TestCase, ev: _Evidence, n_points: int) -> TestCase:
         case.covers = [p for p in case.covers if 1 <= p <= n_points]
 
     observed = [x for x in case.expected if x.observed]
-    if steps_ok and outcome_ok and independent and case.expected and len(observed) == len(case.expected):
+    # "observed" means nothing at all is in doubt: any problem listed keeps the case partial at best
+    if not problems and steps_ok and case.expected and len(observed) == len(case.expected):
         case.grounding = "observed"
     elif observed or any(s.event is not None for s in case.steps):
         case.grounding = "partial"
