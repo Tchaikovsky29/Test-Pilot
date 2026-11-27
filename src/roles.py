@@ -5,7 +5,7 @@ CONTROLS = frozenset(
     "tab menuitem menuitemcheckbox menuitemradio treeitem".split()
 )
 # Text inside these is one line; text across them is not joined.
-BLOCKS = frozenset({"paragraph", "listitem", "row", "LabelText"})
+BLOCKS = frozenset({"paragraph", "listitem", "row", "LabelText", "term", "definition"})  # dt/dd: a label, a value
 # Chrome's AX roles for native date/time inputs: their children are the browser's own widget parts.
 NATIVE_INPUT_ROLES = frozenset({"Date", "DateTime", "InputTime"})
 DATE_INPUT_TYPES = frozenset({"date", "time", "datetime-local", "month", "week"})

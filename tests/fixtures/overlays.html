@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Overlays</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  main { padding: 20px; }
+  .layer { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; }
+  .shade { background: rgba(0,0,0,.4); }
+  .through { pointer-events: none; }
+  .through .box { pointer-events: auto; }
+  .popup { position: fixed; top: 35%; left: 35%; width: 30%; height: 30%; z-index: 50; }
+  .box { background: #fff; padding: 20px; border: 1px solid #333; }
+</style></head>
+<body>
+<!-- ?kind=backdrop   a full-screen shade: nothing behind it can be clicked
+     ?kind=popup      a box over the middle, no shade: the rest of the page can be clicked
+     ?kind=through    a full-screen shade with pointer-events:none: clicks pass through to the page
+     ?kind=dialog     a native <dialog> opened with showModal(): the page is inert -->
+<main>
+  <h1>Search flights</h1>
+  <button id="search">Search</button>
+  <a href="/login">Login</a>
+</main>
+<script>
+  const kind = new URLSearchParams(location.search).get("kind") || "backdrop";
+  const box = '<div class="box" role="dialog"><h2>Notice</h2><p>Please read this</p><button id="ok">OK</button></div>';
+  if (kind === "dialog") {
+    const d = document.createElement("dialog");
+    d.innerHTML = '<h2>Notice</h2><p>Please read this</p><button id="ok">OK</button>';
+    document.body.append(d); d.showModal();
+  } else {
+    const wrap = document.createElement("div");
+    wrap.className = kind === "popup" ? "popup modal" : "layer modal " + (kind === "through" ? "shade through" : "shade");
+    wrap.innerHTML = box;
+    document.body.append(wrap);
+  }
+</script>
+</body></html>

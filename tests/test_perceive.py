@@ -4,6 +4,7 @@ from test_pilot import NavigationError, validate_url
 from test_pilot.locators import is_dynamic_id, verify_locators
 from test_pilot.render import render
 from test_pilot.text import clean_name, is_icon_text  # noqa: E402
+from test_pilot.watch import describe_change
 
 # ---- URL handling (no browser) -------------------------------------------------------------------------------
 
@@ -18,7 +19,8 @@ def test_validate_url_accepts():
 
 
 @pytest.mark.parametrize("v,dyn", [("promo-8f3a9c21d4e5", True), ("ui-id-3", True), (":r1:", True),
-                                    ("hotel_location", False), ("check_in_time", False), ("from", False)])
+                                    ("hotel_location", False), ("check_in_time", False), ("from", False),
+                                    ("input-138", True), ("combobox-button-147", True), ("step-2", False)])
 def test_dynamic_ids(v, dyn):
     assert is_dynamic_id(v) is dyn
 
@@ -123,12 +125,12 @@ def test_change_detection(flight):
     before = flight.snapshot()
     flight.page.click("#go")
     flight.observe()
-    assert flight.change(before, flight.snapshot()) == "page changed"
+    assert describe_change(before, flight.snapshot()) == "page changed"
     before = flight.snapshot()
-    assert flight.change(before, flight.snapshot()) == "no change"
+    assert describe_change(before, flight.snapshot()) == "no change"
     flight.page.click("text=Hotels")
     flight.observe()
-    assert flight.change(before, flight.snapshot()).startswith("navigated to")
+    assert describe_change(before, flight.snapshot()).startswith("navigated to")
 
 
 def test_dialogs_are_handled_and_reported(flight):
@@ -196,3 +198,25 @@ def test_clean_name(raw, clean):
 ])
 def test_is_icon_text(text, icon):
     assert is_icon_text(text) is icon
+
+
+def test_autocomplete_fields_are_marked(flight):
+    flight.page.evaluate("document.querySelector('#from').setAttribute('aria-autocomplete', 'list')")
+    from_element = next(e for e in flight.observe().elements if e.name == "From")
+    assert "autocomplete" in from_element.states
+
+
+def test_city_and_readonly_date_fields_are_marked(flight):
+    flight.page.evaluate("document.querySelector('#from').setAttribute('placeholder', 'City or airport')")
+    obs = flight.observe()
+    by_name = {e.name: e for e in obs.elements}
+    assert "autocomplete" in by_name["From"].states
+    assert "date-picker" in by_name["Departure date"].states
+
+def test_text_in_a_closed_shadow_root_is_read_and_hidden_text_still_is_not(session, base_url):
+    from test_pilot.text import shows
+    session.goto(base_url + "/shadow.html")
+    rd = session.observe().readable()
+    assert shows(rd, "Company", "Probe Labs") and shows(rd, "Email", "probe.qa@example.com")   # page script can't see it
+    assert "Booking confirmed!" not in rd                                                    # opacity:0 stays out
+    assert " ".join(rd).count("Probe Labs") == 1             # the painted copy, not the one under an opacity:0 parent

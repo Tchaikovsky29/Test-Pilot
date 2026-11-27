@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pick a date</title>
+<style>
+  #cal { position: absolute; top: 70px; left: 10px; background: #fff; border: 1px solid #ccc; padding: 6px; display: none; }
+  #cal.open { display: flex; gap: 16px; }
+  .head { display: flex; align-items: center; gap: 8px; }
+  .navbtn { cursor: pointer; width: 24px; height: 24px; border: 0; background: #eee; }
+  td { width: 28px; text-align: center; cursor: pointer; }
+  td.old, td.new, td.muted { color: #aaa; }
+  td.disabled { color: #ddd; cursor: default; }
+  #shade { position: fixed; inset: 0; background: rgba(0,0,0,.05); display: none; z-index: 5; }
+  #shade.open { display: block; }
+  #cal { z-index: 6; }
+</style></head>
+<body>
+<!-- A hand-written picker, configurable to look like different sites (none of them a real library):
+     ?format=dmy|name      value written as "26-11-2026" or "Nov 26, 2026"
+     ?nav=class|aria|bare  prev/next marked by class, by aria-label only, or icon-only with no hint
+     ?mark=yes|no          days of neighbouring months carry old/new classes, or only a look-alike class
+     ?months=1|2           one month shown, or two side by side
+     ?min=YYYY-MM-DD       days before it are disabled
+     ?start=YYYY-MM        the month the calendar opens on
+     ?mode=plain           no calendar: a text field whose site accepts only dd/mm/yyyy
+     ?overlay=1            an open calendar lays a shade over the page (the field included); clicking it closes -->
+<h1>Travel dates</h1>
+<label for="when">Departure Date</label>
+<input id="when" name="when" placeholder="Departure Date" readonly>
+<div id="shade"></div>
+<div id="cal"></div>
+<p id="out"></p>
+<script>
+  const q = new URLSearchParams(location.search);
+  const fmt = q.get("format") || "dmy", nav = q.get("nav") || "class", mark = q.get("mark") || "yes";
+  const months = +(q.get("months") || 1), min = q.get("min") ? new Date(q.get("min") + "T00:00") : null;
+  const [sy, sm] = (q.get("start") || "2026-11").split("-").map(Number);
+  const NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const field = document.getElementById("when"), cal = document.getElementById("cal");
+  let vy = sy, vm = sm - 1;
+
+  if (q.get("mode") === "plain") {
+    field.removeAttribute("readonly");
+    field.placeholder = "dd/mm/yyyy";
+    field.addEventListener("change", () => { if (!/^\d\d\/\d\d\/\d{4}$/.test(field.value)) field.value = ""; });
+  } else {
+    field.addEventListener("click", () => { cal.classList.add("open"); if (q.get("overlay")) shade.classList.add("open"); draw(); });
+    shade.addEventListener("click", () => { cal.classList.remove("open"); shade.classList.remove("open"); });
+  }
+
+  const show = d => fmt === "name"
+    ? `${NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}`
+    : `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+
+  function button(dir) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "navbtn";
+    if (nav === "class") b.classList.add(dir);
+    if (nav === "aria") b.setAttribute("aria-label", dir === "next" ? "Next month" : "Previous month");
+    b.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12"><path d="${dir === "next" ? "M4 2l4 4-4 4" : "M8 2L4 6l4 4"}"/></svg>`;
+    b.addEventListener("click", e => { e.stopPropagation(); vm += dir === "next" ? 1 : -1; if (vm < 0) { vm = 11; vy--; } if (vm > 11) { vm = 0; vy++; } draw(); });
+    return b;
+  }
+
+  function month(y, m, withPrev, withNext) {
+    const box = document.createElement("div");
+    const head = document.createElement("div"); head.className = "head";
+    if (withPrev) head.append(button("prev"));
+    const title = document.createElement("span"); title.textContent = `${NAMES[m]} ${y}`; head.append(title);
+    if (withNext) head.append(button("next"));
+    box.append(head);
+    const t = document.createElement("table");
+    t.innerHTML = "<tr><th>Su</th><th>Mo</th><th>Tu</th><th>We</th><th>Th</th><th>Fr</th><th>Sa</th></tr>";
+    const first = new Date(y, m, 1), startDay = new Date(y, m, 1 - first.getDay());
+    for (let w = 0; w < 6; w++) {
+      const tr = document.createElement("tr");
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + w * 7 + i);
+        const td = document.createElement("td"); td.textContent = d.getDate();
+        if (d.getMonth() !== m) td.className = mark === "yes" ? (d < first ? "old" : "new") : "muted";
+        if (min && d < min) { td.classList.add("disabled"); td.setAttribute("aria-disabled", "true"); }
+        else td.addEventListener("click", e => { e.stopPropagation(); field.value = show(d); field.dispatchEvent(new Event("change", {bubbles: true})); cal.classList.remove("open"); shade.classList.remove("open"); });
+        tr.append(td);
+      }
+      t.append(tr);
+    }
+    box.append(t);
+    return box;
+  }
+
+  function draw() {
+    cal.innerHTML = "";
+    for (let k = 0; k < months; k++) {
+      const d = new Date(vy, vm + k, 1);
+      cal.append(month(d.getFullYear(), d.getMonth(), k === 0, k === months - 1));
+    }
+  }
+</script>
+</body></html>

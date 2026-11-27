@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Record</title></head>
+<body>
+<h1>Probe</h1>
+<!-- Like Lightning's record fields: each value is drawn inside a CLOSED shadow root, out of reach of page script. -->
+<div>Company</div><record-value data-v="Probe Labs"></record-value>
+<div>Email</div><record-value data-v="probe.qa@example.com"></record-value>
+<p style="opacity:0">Booking confirmed!</p>
+<!-- the same value also sits in hidden text elsewhere (like a collapsed tab's title): the drawn one still counts -->
+<div style="opacity:0"><span>Probe Labs</span></div>
+<script>
+  customElements.define("record-value", class extends HTMLElement {
+    constructor() { super(); const root = this.attachShadow({mode: "closed"}); root.textContent = this.dataset.v; }
+  });
+</script>
+</body></html>

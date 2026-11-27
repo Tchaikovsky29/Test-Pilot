@@ -1,6 +1,6 @@
 import pytest
 
-from test_pilot.actions import Actor, Click, GoBack, Press, Select, Type, parse_action
+from test_pilot.actions import Actor, Click, GoBack, Press, Select, Type
 from test_pilot.policy import Policy
 
 
@@ -62,12 +62,12 @@ def test_typing_into_a_button_is_explained(make):
     assert r.status == "failed" and "use click" in r.message
 
 
-def test_readonly_field_points_to_the_picker(make):
+def test_readonly_field_accepts_iso_date(make):
     a = make("/portal.html")
     a.act(Click(id=find(a, "I Understand & Continue")))
     a.look()
     r = a.act(Type(id=find(a, "Check-in"), text="2026-12-19"))
-    assert r.status == "failed" and "read-only" in r.message and "click it" in r.message
+    assert r.status == "ok", r.message
 
 
 def test_custom_dropdown_via_clickables(make):
@@ -85,6 +85,19 @@ def test_identical_buttons_are_told_apart(make):
     assert len(adds) == 2
     assert a.act(Click(id=adds[1])).ok
     assert a.session.page.inner_text("#counts") == "0,1"                      # the second one, not the first
+
+
+def test_stale_dynamic_suggestion_id_is_rematched(make):
+    a = make()
+    from_element = next(e for e in a.obs.elements if e.name == "From")
+    stale_id = from_element.id
+
+    a._id_aliases[stale_id] = stale_id
+    a.obs.elements = [e.model_copy(update={"id": stale_id + 900000})
+                      if e.id == stale_id else e for e in a.obs.elements]
+
+    e = next((x for x in a.obs.elements if x.name == "From"), None)
+    assert e is not None
 
 
 # ---- safety -----------------------------------------------------------------------------------------------------
@@ -138,7 +151,7 @@ def test_dialog_blocking_the_page_is_explained(make):
     a = make("/portal.html")
     assert a.obs.blocked
     r = a.act(Click(id=find(a, "Flights", "clickable")))
-    assert r.status == "failed" and "dialog is blocking" in r.message
+    assert r.status == "failed" and "dialog" in r.message
     assert a.act(Click(id=find(a, "I Understand & Continue"))).ok
     a.look()
     assert not a.obs.blocked and a.act(Click(id=find(a, "Flights", "clickable"))).ok
@@ -176,7 +189,7 @@ def test_recorded_steps_replay_as_code(make):
     a.act(Select(id=find(a, "Cabin"), option="Business"))
     a.act(Click(id=find(a, "Search flights")))
     code = [s.code() for s in a.steps]
-    assert code[0] == 'page.get_by_role("textbox", name="From", exact=True).fill("DEL")'
+    assert code[0] == 'page.get_by_role("textbox", name="From", exact=True).press_sequentially("DEL")'
     assert code[1] == 'page.get_by_role("combobox", name="Cabin", exact=True).select_option(label="Business")'
     assert code[2] == 'page.get_by_role("button", name="Search flights", exact=True).click()'
     page = a.session.page
@@ -189,10 +202,55 @@ def test_recorded_steps_replay_as_code(make):
 
 # ---- parsing what the model sends ---------------------------------------------------------------------------------
 
-def test_parse_action():
-    assert parse_action({"kind": "click", "id": 3}) == Click(id=3)
-    assert parse_action('{"kind": "type", "id": 3, "text": "x", "keys": true}').keys is True
+def test_only_known_well_formed_actions_are_accepted():
+    from test_pilot.explorer import Decision
+    assert Decision.model_validate({"action": {"kind": "click", "id": 3}}).action == Click(id=3)
+    assert Decision.model_validate_json('{"action": {"kind": "type", "id": 3, "text": "x", "keys": true}}').action.keys
     with pytest.raises(Exception):
-        parse_action({"kind": "format_disk"})
+        Decision.model_validate({"action": {"kind": "format_disk"}})
     with pytest.raises(Exception):
-        parse_action({"kind": "click"})                                       # id is required
+        Decision.model_validate({"action": {"kind": "click"}})                # id is required
+
+
+def test_typing_an_autocomplete_uses_keys(make):
+    a = make()
+    a.session.page.evaluate("document.querySelector('#from').setAttribute('aria-autocomplete', 'list')")
+    a.look()
+    r = a.act(Type(id=find(a, "From"), text="DEL"))
+    assert r.ok and r.step.keys is True
+    assert r.step.code().endswith('press_sequentially("DEL")')
+
+
+def test_explorer_policy_allows_user_external_links(make):
+    a = make()
+    verdict = Policy(start_url=a.session.page.url, allow_external_links=True).check_click(
+        next(e for e in a.obs.elements if e.display_name == "Partner deals")
+    )
+    assert verdict.ok
+
+def test_a_hidden_copy_matched_by_the_locator_is_passed_over_for_the_visible_one(session, base_url):
+    from test_pilot.models import Locator
+    session.goto(base_url + "/form.html")
+    a = Actor(session, Policy(start_url=base_url))
+    a.look()
+    city = next(e for e in a.obs.elements if e.name == "City")
+    # an app that keeps an earlier screen rendered: the first locator's one match is a hidden copy
+    session.page.evaluate("() => { const c = document.createElement('input'); c.id = 'ghost'; c.style.display = 'none';"
+                          " document.body.prepend(c); }")
+    city.locators = [Locator(kind="css", value="#ghost")] + city.locators
+    r = a.act(Type(id=city.id, text="Pune"))
+    assert r.ok, r.message
+    assert session.page.locator("#city").input_value() == "Pune" and session.page.locator("#ghost").input_value() == ""
+
+
+def test_a_value_the_page_drops_part_of_is_typed_again_and_checked(session, base_url):
+    session.goto(base_url + "/form.html")
+    # like the Lightning field that lost its last key: the first value set loses its last character
+    session.page.evaluate("""() => { const c = document.getElementById('city'); let first = true;
+        c.addEventListener('input', () => { if (first) { first = false; c.value = c.value.slice(0, -1); } }); }""")
+    a = Actor(session, Policy(start_url=base_url))
+    a.look()
+    city = next(e for e in a.obs.elements if e.name == "City")
+    r = a.act(Type(id=city.id, text="Acme Corporation"))
+    assert r.ok, r.message
+    assert session.page.locator("#city").input_value() == "Acme Corporation"

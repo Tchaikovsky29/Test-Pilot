@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI test-case generator: explore a web app with Playwright, generate and run tests"
 requires-python = ">=3.11"
 dependencies = [
+    "openai>=1.60",
     "playwright>=1.51",
     "pytest-playwright>=0.10.0",
     "pydantic>=2.5",

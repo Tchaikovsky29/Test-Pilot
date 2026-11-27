@@ -13,8 +13,9 @@ from .text import clean_name
 from .models import Element, Locator
 from .roles import CONTROLS, LABELLED
 
-# Ids that look machine-generated: long digit runs, hex blobs, React :r1: ids, ember123, ui-id-3.
-_DYNAMIC_ID = re.compile(r"\d{4,}|[0-9a-f]{8,}|^:r|ember\d+|ui-id-\d+", re.I)
+# Ids that look machine-generated: long digit runs, hex blobs, React :r1: ids, ember123, ui-id-3, and a word with a
+# render counter (Lightning's input-138, combobox-button-147: the number changes every time the form is drawn).
+_DYNAMIC_ID = re.compile(r"\d{4,}|[0-9a-f]{8,}|^:r|ember\d+|ui-id-\d+|^[a-z][a-z-]*-\d{2,}$", re.I)
 _TESTID_ATTRS = ("data-testid", "data-test-id")
 _OTHER_TEST_ATTRS = ("data-test", "data-qa", "data-cy")
 MAX_TEXT_NAME = 80  # very long names (whole result cards) make brittle locators
@@ -26,6 +27,16 @@ def is_dynamic_id(value: str) -> bool:
 
 def _css_attr(attr: str, value: str) -> str:
     return f'[{attr}="{value.replace(chr(92), chr(92) * 2).replace(chr(34), chr(92) + chr(34))}"]'
+
+
+def _prefix(text: str, limit: int = 60) -> str:
+    """The leading whole words of `text`, at most `limit` characters (one word if the first is longer)."""
+    words, out = text.split(), ""
+    for w in words:
+        if out and len(out) + 1 + len(w) > limit:
+            break
+        out = f"{out} {w}" if out else w
+    return out.rstrip(",;:")
 
 
 def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
@@ -46,10 +57,15 @@ def candidates(e: Element, attrs: dict[str, str]) -> list[Locator]:
     for a in _OTHER_TEST_ATTRS:
         if attrs.get(a):
             out.append(Locator(kind="css", value=_css_attr(a, attrs[a])))
-    if name and (e.role in ("button", "link") or e.widget == "clickable") and len(name) <= MAX_TEXT_NAME:
-        if clean != name:
-            out.append(Locator(kind="text", value=clean, exact=False))
-        out.append(Locator(kind="text", value=name))
+    if name and (e.role in ("button", "link") or e.widget == "clickable"):
+        if len(name) <= MAX_TEXT_NAME:
+            if clean != name:
+                out.append(Locator(kind="text", value=clean, exact=False))
+            out.append(Locator(kind="text", value=name))
+        else:
+            # A long name (an autocomplete option with city, region and airport) still needs a handle: its opening
+            # words, matched as a substring. verify_locators() rejects it if it is not unique.
+            out.append(Locator(kind="text", value=_prefix(clean or name), exact=False))
     if attrs.get("id") and not is_dynamic_id(attrs["id"]):
         out.append(Locator(kind="css", value=_css_attr("id", attrs["id"])))
     if attrs.get("name") and e.tag:

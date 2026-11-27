@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Flights</title></head>
+<body>
+<h1>Search flights</h1>
+<div>From <span id="from">(choose)</span> To <span id="to">(choose)</span></div>
+<button id="go" type="button">Search Flights</button>
+<div id="toast"></div>
+<script>
+  // Like many booking sites: a missing choice is reported in a plain toast, not on a field and not as role=alert.
+  go.addEventListener('click', () => { toast.textContent = 'Please select both departure and arrival airports!'; });
+</script>
+</body></html>

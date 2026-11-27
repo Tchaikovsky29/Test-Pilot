@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+untracked/*
+artifacts/*
+# saved logged-in sessions (cookies): private
+.test-pilot/

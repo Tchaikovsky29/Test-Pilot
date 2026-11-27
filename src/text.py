@@ -51,3 +51,19 @@ def clean_name(name: str) -> str:
         if not m or not out[:m.start()]:
             return out
         out = out[:m.start()]
+
+def shows(readable: list[str], label: str, value: str, within: int = 2) -> bool:
+    """Does a page read as `label` followed, within a few lines, by `value`? How a record page shows a saved field
+    ("Company" ... "TechNova Solutions"), whatever its markup. Also accepts "Label: value" on one line."""
+    lab, val = fold(label).strip().rstrip(":"), fold(value).strip()
+    if not lab or not val:
+        return False
+    for i, t in enumerate(readable):
+        f = fold(t).strip()
+        if f.startswith(lab + ":") and val in f:
+            return True
+        if re.search(rf"(^|\s){re.escape(lab)}:?\s+{re.escape(val)}", f):  # "... Company TechNova Solutions ..."
+            return True
+        if f.rstrip(":") == lab and any(val in fold(n) for n in readable[i + 1:i + 1 + within]):
+            return True
+    return False

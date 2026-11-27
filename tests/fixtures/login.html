@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Org</title></head>
+<body>
+<!-- A login wall: with the "sid" cookie the app shows, without it a password form does. -->
+<div id="app" hidden><h1>Welcome back</h1><a href="#leads">Leads</a></div>
+<form id="login" hidden>
+  <label for="u">Username</label><input id="u">
+  <label for="p">Password</label><input id="p" type="password">
+  <button type="button" id="in">Log In</button>
+</form>
+<script>
+  const signedIn = document.cookie.includes("sid=");
+  document.getElementById(signedIn ? "app" : "login").hidden = false;
+  document.getElementById("in").onclick = () => {   // stands in for a person logging in
+    document.cookie = "sid=abc; path=/; max-age=3600"; location.reload();
+  };
+</script>
+</body></html>

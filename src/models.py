@@ -60,6 +60,8 @@ class Element(BaseModel):
     input_type: str = ""
     required: bool = False
     description: str = ""  # aria-describedby text: hints and validation messages live here
+    validation: str = ""  # the browser's own error for this field, only after the user (or an agent) tried to submit
+    constraints: dict[str, str] = Field(default_factory=dict)  # pattern, minlength, maxlength, min, max, step
     href: str = ""
     frame_url: str = ""  # "" for the main frame
     is_new: bool = False  # not present in the previous observation
@@ -69,18 +71,22 @@ class Element(BaseModel):
     def display_name(self) -> str:
         """The name without a leading icon-font word, for the model to read. Locators keep using `name`."""
         return clean_name(self.name)
-    
+
     def best_locator(self) -> Locator | None:
         return next((loc for loc in self.locators if loc.matches == 1), None)
 
 
 class Line(BaseModel):
-    kind: Literal["heading", "text", "control", "frame", "overlay"]
+    kind: Literal["heading", "text", "control", "frame", "overlay", "alert"]
     text: str = ""
     element_id: int | None = None
+    x: float | None = None  # left and top edge in document coordinates; None = unknown, so always listed
+    y: float | None = None
 
 
 _VARIABLE = re.compile(r"\d+|[0-9a-f]{8}-[0-9a-f-]{27}")
+INPUT_WIDGETS = {"textbox", "searchbox", "combobox", "select", "spinbutton", "date", "checkbox", "radio", "switch",
+                 "slider", "file"}  # controls that hold what the user enters
 _SIG_SKIP = {"link", "option", "tab", "menuitem", "treeitem"}
 
 
@@ -92,7 +98,11 @@ class Observation(BaseModel):
     dialogs: list[str] = Field(default_factory=list)
     pending_requests: int = 0
     nav_error: str | None = None
-    blocked: bool = False  # a modal dialog covers the page: its lines come first
+    blocked: bool = False  # an overlay sits over the middle of the page: its lines come first
+    modal: bool = False  # ...and clicks cannot reach the page behind it (a backdrop, or a modal <dialog>)
+    scroll_y: float = 0.0  # where the viewport sits in the document
+    viewport_w: float = 0.0
+    viewport_h: float = 0.0  # 0 = unknown: the view is not windowed
 
     @property
     def by_id(self) -> dict[int, Element]:
@@ -101,11 +111,48 @@ class Observation(BaseModel):
     def element(self, element_id: int) -> Element | None:
         return self.by_id.get(element_id)
 
+    def dialog_controls(self) -> set[int]:
+        """Ids of the controls inside the open dialog (between the overlay markers)."""
+        ids: set[int] = set()
+        in_dialog = False
+        for ln in self.lines:
+            if ln.kind == "overlay":
+                in_dialog = not ln.text.startswith("end")
+            elif in_dialog and ln.kind == "control" and ln.element_id is not None:
+                ids.add(ln.element_id)
+        return ids
+
+    def readable(self, max_len: int = 120) -> list[str]:
+        """What the page displays, in reading order: headings, text, links and buttons. A record page reads "Company",
+        "TechNova Solutions", "Email", "john@example.com", ...: a label, then the saved value. Form inputs are left
+        out: what a text box holds is what was typed, not what was saved (that is a field_value check)."""
+        out: list[str] = []
+        by_id = self.by_id
+        for ln in self.lines:
+            if ln.kind in ("heading", "text", "alert") and ln.text:
+                out.append(ln.text[:max_len])
+            elif ln.kind == "control" and ln.element_id in by_id and by_id[ln.element_id].widget not in INPUT_WIDGETS:
+                e = by_id[ln.element_id]
+                out += [t[:max_len] for t in (e.display_name, e.value) if t]
+        return out
+
     def signature(self) -> str:
         """A coarse page-type fingerprint: URL path pattern + form-ish controls + headings, with numbers erased.
-        Typing into a field or a different search result list must not change it. Refined later for the site graph."""
+        Typing into a field or a different search result list must not change it, and neither does a modal dialog
+        that happens to be open (its lines sit between the overlay markers and are left out). Refined later for
+        the site graph."""
         path = "/".join("{n}" if _VARIABLE.fullmatch(p) else p for p in urlparse(self.url).path.split("/"))
-        fields = sorted({(e.widget, _VARIABLE.sub("#", e.name.lower())) for e in self.elements if e.widget not in _SIG_SKIP})
-        heads = sorted({_VARIABLE.sub("#", ln.text.lower()) for ln in self.lines if ln.kind == "heading"})
+        dialog_controls = self.dialog_controls()
+        dialog_headings: set[str] = set()
+        in_dialog = False
+        for ln in self.lines:
+            if ln.kind == "overlay":
+                in_dialog = not ln.text.startswith("end")
+            elif in_dialog and ln.kind == "heading":
+                dialog_headings.add(ln.text)
+        fields = sorted({(e.widget, _VARIABLE.sub("#", e.name.lower())) for e in self.elements
+                         if e.widget not in _SIG_SKIP and e.id not in dialog_controls})
+        heads = sorted({_VARIABLE.sub("#", ln.text.lower()) for ln in self.lines
+                        if ln.kind == "heading" and ln.text not in dialog_headings})
         raw = json.dumps([path, fields, heads], ensure_ascii=False)
         return hashlib.sha1(raw.encode()).hexdigest()[:12]
